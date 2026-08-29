@@ -8,7 +8,8 @@ import {
   normalizedName,
   queryUrl,
 } from "@/lib/fire-feeds";
-import { markFiresActive, savePerimeterSnapshots } from "@/lib/perimeter-store";
+import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots } from "@/lib/perimeter-store";
+import { PERIMETER_RETENTION_MS } from "@/lib/capture";
 
 const NIFC_INCIDENTS =
   "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query";
@@ -326,6 +327,7 @@ export async function GET() {
       .map((feature) => activeFireIdentity(feature as Parameters<typeof activeFireIdentity>[0]))
       .filter((identity): identity is { irwinId: string; incidentName: string } => identity !== null);
     await markFiresActive(active, Date.now());
+    await purgePerimeterHistory(Date.now() - PERIMETER_RETENTION_MS);
   } catch {
     historyAvailable = false;
   }

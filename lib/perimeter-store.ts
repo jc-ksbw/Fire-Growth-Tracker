@@ -12,15 +12,6 @@ function getBinding() {
   return env.DB;
 }
 
-function fnv1a(value: string) {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < value.length; i += 1) {
-    hash ^= value.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16);
-}
-
 const textValue = (value: unknown) =>
   typeof value === "string" && value.trim() ? value.trim() : null;
 const numberValue = (value: unknown) =>
@@ -28,13 +19,8 @@ const numberValue = (value: unknown) =>
 
 export async function savePerimeterSnapshots(features: PerimeterFeature[]) {
   const db = getBinding();
-  const existing = await db
-    .prepare("SELECT irwin_id, version_key FROM perimeter_snapshots ORDER BY captured_at DESC LIMIT 4000")
-    .all<{ irwin_id: string; version_key: string }>();
-  const known = new Set(
-    (existing.results ?? []).map((row) => `${row.irwin_id}|${row.version_key}`),
-  );
   const capturedAt = Date.now();
+  const archiveDay = new Date(capturedAt).toISOString().slice(0, 10);
   const statements: D1PreparedStatement[] = [];
 
   for (const feature of features) {
@@ -51,17 +37,23 @@ export async function savePerimeterSnapshots(features: PerimeterFeature[]) {
 
     const geometryJson = JSON.stringify(feature.geometry);
     const perimeterDate = numberValue(p.poly_PolygonDateTime) ?? numberValue(p.poly_DateCurrent);
-    const versionKey = perimeterDate
-      ? String(perimeterDate)
-      : `${Math.round((acres ?? 0) * 1000)}-${fnv1a(geometryJson)}`;
-    if (known.has(`${irwinId}|${versionKey}`)) continue;
-    known.add(`${irwinId}|${versionKey}`);
+    const versionKey = `daily-${archiveDay}`;
     statements.push(
       db.prepare(
-        `INSERT OR IGNORE INTO perimeter_snapshots
+        `INSERT INTO perimeter_snapshots
          (irwin_id, unique_fire_id, incident_name, version_key, captured_at,
           perimeter_date, acres, contained, state, county, geometry_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(irwin_id, version_key) DO UPDATE SET
+           unique_fire_id = excluded.unique_fire_id,
+           incident_name = excluded.incident_name,
+           captured_at = excluded.captured_at,
+           perimeter_date = excluded.perimeter_date,
+           acres = excluded.acres,
+           contained = excluded.contained,
+           state = excluded.state,
+           county = excluded.county,
+           geometry_json = excluded.geometry_json`,
       ).bind(
         irwinId,
         textValue(p.attr_UniqueFireIdentifier),
@@ -115,20 +107,50 @@ export async function markFiresActive(fires: Array<{ irwinId: string; incidentNa
  * Deletes history for fires whose last appearance in the active feed is older
  * than `cutoff` (i.e. the fire ended and its 48-hour grace window has passed).
  */
-export async function purgeEndedFires(cutoff: number) {
+export async function purgePerimeterHistory(cutoff: number) {
   const db = getBinding();
-  const stale = await db
-    .prepare("SELECT irwin_id FROM fire_activity WHERE last_active_at < ?")
-    .bind(cutoff)
-    .all<{ irwin_id: string }>();
-  const ids = (stale.results ?? []).map((row) => row.irwin_id);
-  let snapshotsDeleted = 0;
-  for (const irwinId of ids) {
-    const deletion = await db.prepare("DELETE FROM perimeter_snapshots WHERE irwin_id = ?").bind(irwinId).run();
-    snapshotsDeleted += deletion.meta?.changes ?? 0;
-    await db.prepare("DELETE FROM fire_activity WHERE irwin_id = ?").bind(irwinId).run();
-  }
-  return { firesPurged: ids.length, snapshotsDeleted };
+  const deletion = await db.prepare("DELETE FROM perimeter_snapshots WHERE captured_at < ?").bind(cutoff).run();
+  const activityDeletion = await db.prepare("DELETE FROM fire_activity WHERE last_active_at < ?").bind(cutoff).run();
+  return {
+    activityRowsDeleted: activityDeletion.meta?.changes ?? 0,
+    snapshotsDeleted: deletion.meta?.changes ?? 0,
+  };
+}
+
+export async function getArchiveDays() {
+  const result = await getBinding().prepare(
+    `SELECT substr(datetime(captured_at / 1000, 'unixepoch'), 1, 10) AS archive_day,
+            COUNT(*) AS perimeter_count, MAX(captured_at) AS captured_at
+     FROM perimeter_snapshots GROUP BY archive_day
+     ORDER BY archive_day DESC LIMIT 20`,
+  ).all<{ archive_day: string; perimeter_count: number; captured_at: number }>();
+  return (result.results ?? []).map((row) => ({
+    date: row.archive_day,
+    perimeterCount: row.perimeter_count,
+    capturedAt: row.captured_at,
+  }));
+}
+
+export async function getDailyPerimeters(date: string) {
+  const start = Date.parse(`${date}T00:00:00.000Z`);
+  if (!Number.isFinite(start)) return [];
+  const result = await getBinding().prepare(
+    `SELECT irwin_id, incident_name, captured_at, perimeter_date, acres,
+            contained, state, county, geometry_json
+     FROM perimeter_snapshots
+     WHERE captured_at >= ? AND captured_at < ?
+     ORDER BY incident_name ASC`,
+  ).bind(start, start + 86_400_000).all<{
+    irwin_id: string; incident_name: string; captured_at: number;
+    perimeter_date: number | null; acres: number | null; contained: number | null;
+    state: string | null; county: string | null; geometry_json: string;
+  }>();
+  return (result.results ?? []).map((row) => ({
+    irwinId: row.irwin_id, incidentName: row.incident_name,
+    capturedAt: row.captured_at, perimeterDate: row.perimeter_date,
+    acres: row.acres, contained: row.contained, state: row.state, county: row.county,
+    geometry: JSON.parse(row.geometry_json) as GeoJsonGeometry,
+  }));
 }
 
 export async function getPerimeterHistory(irwinId: string) {

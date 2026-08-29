@@ -12,9 +12,9 @@ import {
   Check,
   CircleAlert,
   Clock,
-  Cloud,
   Copy,
   Download,
+  ExternalLink,
   Flame,
   ImageDown,
   Layers3,
@@ -28,7 +28,9 @@ import {
   ShieldAlert,
   Thermometer,
   TrendingUp,
+  Video,
   Wind,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -83,6 +85,14 @@ type FollowedFire = {
   evacuationHash: string;
   updatedAt: number;
 };
+type NearbyCamera = {
+  name: string;
+  cameraId: string;
+  county: string | null;
+  distanceMiles: number;
+  url: string;
+};
+type MetricId = "tracked" | "new" | "perimeters" | "evacuations" | "hotspots" | "following" | "acres" | "updated";
 type FireConditions = {
   updatedAt: number;
   weather: {
@@ -115,6 +125,8 @@ const EMPTY: FeatureCollection = { type: "FeatureCollection", features: [] };
 const DMA_STORAGE_KEY = "fire-growth-tracker-dma";
 const ALERT_STORAGE_KEY = "fire-growth-tracker-alert-preferences";
 const FOLLOWED_FIRES_KEY = "fire-growth-tracker-followed-fires";
+const METRICS_STORAGE_KEY = "fire-growth-tracker-metrics";
+const DEFAULT_METRICS: MetricId[] = ["tracked", "new", "perimeters", "evacuations", "hotspots"];
 const DEFAULT_ALERTS: AlertPreferences = {
   coverageNewFires: true,
   evacuationChanges: true,
@@ -195,6 +207,16 @@ function loadFollowedFires(): FollowedFire[] {
     return Array.isArray(stored) ? stored.filter((fire) => fire && typeof fire.id === "string") : [];
   } catch {
     return [];
+  }
+}
+
+function loadMetricPreferences(): MetricId[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem(METRICS_STORAGE_KEY) ?? "null") as MetricId[] | null;
+    const allowed = new Set<MetricId>(["tracked", "new", "perimeters", "evacuations", "hotspots", "following", "acres", "updated"]);
+    return Array.isArray(stored) ? stored.filter((id) => allowed.has(id)).slice(0, 5) : DEFAULT_METRICS;
+  } catch {
+    return DEFAULT_METRICS;
   }
 }
 
@@ -347,6 +369,22 @@ function geometryBounds(geometry: Geometry) {
   return [[west, south], [east, north]] as [Position, Position];
 }
 
+function collectionsBounds(collections: FeatureCollection[]) {
+  let west = 180, east = -180, south = 90, north = -90;
+  let found = false;
+  for (const collection of collections) {
+    for (const feature of collection.features) {
+      if (!feature.geometry) continue;
+      walkPositions(feature.geometry.coordinates, ([longitude, latitude]) => {
+        found = true;
+        west = Math.min(west, longitude); east = Math.max(east, longitude);
+        south = Math.min(south, latitude); north = Math.max(north, latitude);
+      });
+    }
+  }
+  return found ? [[west, south], [east, north]] as [Position, Position] : null;
+}
+
 function geometryIntersectsCoverage(geometry: Geometry, coverage: Geometry) {
   if (geometry.type === "Point") return pointInGeometry(geometry.coordinates as Position, coverage);
   let intersects = false;
@@ -378,7 +416,45 @@ function evacuationLabel(feature: Feature) {
     ?? "Evacuation zone";
 }
 
-function frameCanvas(snapshots: Snapshot[], activeIndex: number) {
+function worldPixel([longitude, latitude]: Position, zoom: number): Position {
+  const scale = 256 * 2 ** zoom;
+  const clamped = Math.max(-85.0511, Math.min(85.0511, latitude));
+  const sin = Math.sin(clamped * Math.PI / 180);
+  return [
+    (longitude + 180) / 360 * scale,
+    (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale,
+  ];
+}
+
+async function drawBaseMap(
+  context: CanvasRenderingContext2D,
+  zoom: number,
+  worldWest: number,
+  worldNorth: number,
+  plot: { left: number; top: number; right: number; bottom: number },
+) {
+  const firstX = Math.floor(worldWest / 256);
+  const firstY = Math.floor(worldNorth / 256);
+  const lastX = Math.floor((worldWest + plot.right - plot.left) / 256);
+  const lastY = Math.floor((worldNorth + plot.bottom - plot.top) / 256);
+  const tiles: Promise<void>[] = [];
+  for (let x = firstX; x <= lastX; x += 1) {
+    for (let y = firstY; y <= lastY; y += 1) {
+      tiles.push((async () => {
+        try {
+          const response = await fetch(`/api/map-tile?z=${zoom}&x=${x}&y=${y}`);
+          if (!response.ok) return;
+          const image = await createImageBitmap(await response.blob());
+          context.drawImage(image, plot.left + x * 256 - worldWest, plot.top + y * 256 - worldNorth, 256, 256);
+          image.close();
+        } catch { /* A missing tile never blocks the perimeter graphic. */ }
+      })());
+    }
+  }
+  await Promise.all(tiles);
+}
+
+async function frameCanvas(snapshots: Snapshot[], activeIndex: number) {
   const canvas = document.createElement("canvas");
   canvas.width = 1280;
   canvas.height = 720;
@@ -404,21 +480,26 @@ function frameCanvas(snapshots: Snapshot[], activeIndex: number) {
   south -= latitudeSpan * 0.16;
   north += latitudeSpan * 0.16;
   const plot = { left: 84, top: 92, right: 1196, bottom: 566 };
-  const project = ([longitude, latitude]: Position) => [
-    plot.left + ((longitude - west) / (east - west)) * (plot.right - plot.left),
-    plot.bottom - ((latitude - south) / (north - south)) * (plot.bottom - plot.top),
-  ] as Position;
+  let zoom = 14;
+  for (; zoom > 2; zoom -= 1) {
+    const northwest = worldPixel([west, north], zoom);
+    const southeast = worldPixel([east, south], zoom);
+    if (southeast[0] - northwest[0] <= plot.right - plot.left && southeast[1] - northwest[1] <= plot.bottom - plot.top) break;
+  }
+  const northwest = worldPixel([west, north], zoom);
+  const southeast = worldPixel([east, south], zoom);
+  const worldWest = (northwest[0] + southeast[0] - (plot.right - plot.left)) / 2;
+  const worldNorth = (northwest[1] + southeast[1] - (plot.bottom - plot.top)) / 2;
+  const project = (position: Position) => {
+    const [x, y] = worldPixel(position, zoom);
+    return [plot.left + x - worldWest, plot.top + y - worldNorth] as Position;
+  };
 
   context.fillStyle = "#0d1113";
   context.fillRect(0, 0, canvas.width, canvas.height);
-  context.strokeStyle = "rgba(255,255,255,.05)";
-  context.lineWidth = 1;
-  for (let x = plot.left; x <= plot.right; x += 80) {
-    context.beginPath(); context.moveTo(x, plot.top); context.lineTo(x, plot.bottom); context.stroke();
-  }
-  for (let y = plot.top; y <= plot.bottom; y += 68) {
-    context.beginPath(); context.moveTo(plot.left, y); context.lineTo(plot.right, y); context.stroke();
-  }
+  await drawBaseMap(context, zoom, worldWest, worldNorth, plot);
+  context.fillStyle = "rgba(6,10,12,.22)";
+  context.fillRect(plot.left, plot.top, plot.right - plot.left, plot.bottom - plot.top);
 
   const draw = (geometry: Geometry, fill: string, stroke: string, width: number) => {
     if (geometry.type === "Point") return;
@@ -565,7 +646,7 @@ async function growthGifBlob(frames: Snapshot[]) {
   const gif = GIFEncoder();
   let palette: number[][] | undefined;
   for (let index = 0; index < frames.length; index += 1) {
-    const canvas = frameCanvas(frames, index);
+    const canvas = await frameCanvas(frames, index);
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context) continue;
     const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
@@ -611,6 +692,92 @@ function AcresSparkline({ snapshots }: { snapshots: Snapshot[] }) {
   );
 }
 
+function GrowthMapPreview({ snapshots, activeIndex }: { snapshots: Snapshot[]; activeIndex: number }) {
+  const previewRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!snapshots.length) return;
+    void frameCanvas(snapshots, Math.min(activeIndex, snapshots.length - 1)).then((rendered) => {
+      const preview = previewRef.current;
+      if (!preview || cancelled) return;
+      preview.width = rendered.width;
+      preview.height = rendered.height;
+      preview.getContext("2d")?.drawImage(rendered, 0, 0);
+    });
+    return () => { cancelled = true; };
+  }, [snapshots, activeIndex]);
+  return <canvas ref={previewRef} className="growth-map-preview" aria-label="Fire perimeter map preview" />;
+}
+
+function OverviewFallbackMap({ data, coverage }: { data: DashboardData | null; coverage: DmaFeature | null }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!data) return;
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context) return;
+    canvas.width = 1280;
+    canvas.height = 720;
+    const plot = { left: 0, top: 0, right: canvas.width, bottom: canvas.height };
+    const bounds = coverage?.geometry
+      ? geometryBounds(coverage.geometry)
+      : collectionsBounds([data.fires, data.perimeters, data.evacuations]);
+    if (!bounds) return;
+    let [[west, south], [east, north]] = bounds;
+    const longitudePad = Math.max((east - west) * 0.08, 0.08);
+    const latitudePad = Math.max((north - south) * 0.08, 0.08);
+    west -= longitudePad; east += longitudePad; south -= latitudePad; north += latitudePad;
+    let zoom = 12;
+    for (; zoom > 2; zoom -= 1) {
+      const northwest = worldPixel([west, north], zoom);
+      const southeast = worldPixel([east, south], zoom);
+      if (southeast[0] - northwest[0] <= canvas.width && southeast[1] - northwest[1] <= canvas.height) break;
+    }
+    const northwest = worldPixel([west, north], zoom);
+    const southeast = worldPixel([east, south], zoom);
+    const worldWest = (northwest[0] + southeast[0] - canvas.width) / 2;
+    const worldNorth = (northwest[1] + southeast[1] - canvas.height) / 2;
+    const project = (position: Position) => {
+      const [x, y] = worldPixel(position, zoom);
+      return [x - worldWest, y - worldNorth] as Position;
+    };
+    const drawGeometry = (geometry: Geometry, fill: string, stroke: string, width: number) => {
+      if (geometry.type === "Point") return;
+      const shapes = geometry.type === "Polygon" ? [geometry.coordinates as Position[][]] : geometry.coordinates as Position[][][];
+      for (const polygon of shapes) {
+        for (const ring of polygon) {
+          context.beginPath();
+          ring.forEach((position, index) => {
+            const [x, y] = project(position);
+            if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+          });
+          context.closePath(); context.fillStyle = fill; context.fill();
+          context.strokeStyle = stroke; context.lineWidth = width; context.stroke();
+        }
+      }
+    };
+    context.fillStyle = "#dfe5e5";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    void drawBaseMap(context, zoom, worldWest, worldNorth, plot).then(() => {
+      if (cancelled) return;
+      context.fillStyle = "rgba(10,15,17,.16)";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      for (const zone of data.evacuations.features) if (zone.geometry) drawGeometry(zone.geometry, "rgba(226,63,50,.22)", "#e23f32", 2);
+      for (const perimeter of data.perimeters.features) if (perimeter.geometry) drawGeometry(perimeter.geometry, "rgba(239,67,43,.34)", "#ff8a3d", 3);
+      for (const fire of data.fires.features) {
+        if (fire.geometry?.type !== "Point") continue;
+        const [x, y] = project(fire.geometry.coordinates as Position);
+        context.beginPath(); context.arc(x, y, fire.properties.isNew === true ? 7 : 5, 0, Math.PI * 2);
+        context.fillStyle = fire.properties.isNew === true ? "#ffd166" : "#ef432b"; context.fill();
+        context.strokeStyle = "#fff4dc"; context.lineWidth = 1.5; context.stroke();
+      }
+    });
+    return () => { cancelled = true; };
+  }, [data, coverage]);
+  return <canvas ref={canvasRef} className="fallback-map" aria-hidden="true" />;
+}
+
 export default function FireDashboard() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
@@ -637,6 +804,10 @@ export default function FireDashboard() {
   const [newsroomExporting, setNewsroomExporting] = useState(false);
   const [breaking, setBreaking] = useState<Feature[]>([]);
   const [copied, setCopied] = useState<"link" | "summary" | null>(null);
+  const [metricPreferences, setMetricPreferences] = useState<MetricId[]>(DEFAULT_METRICS);
+  const [nearbyCameras, setNearbyCameras] = useState<NearbyCamera[]>([]);
+  const [camerasLoading, setCamerasLoading] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
   const deepLinkAppliedRef = useRef(false);
   const seenFiresRef = useRef<Record<string, number> | null>(null);
   const feedStatusRef = useRef<Record<string, boolean> | null>(null);
@@ -646,6 +817,7 @@ export default function FireDashboard() {
   useEffect(() => {
     setAlertPreferences(loadAlertPreferences());
     setFollowedFires(loadFollowedFires());
+    setMetricPreferences(loadMetricPreferences());
     followedLoadedRef.current = true;
   }, []);
 
@@ -727,9 +899,9 @@ export default function FireDashboard() {
         sources: {
           "esri-streets": {
             type: "raster",
-            tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"],
+            tiles: ["/api/map-tile?z={z}&x={x}&y={y}"],
             tileSize: 256,
-            attribution: "Tiles © Esri",
+            attribution: "© OpenStreetMap contributors © CARTO",
           },
         },
         layers: [{ id: "esri-streets", type: "raster", source: "esri-streets" }],
@@ -737,7 +909,10 @@ export default function FireDashboard() {
       center: [-119.45, 37.25],
       zoom: 5.15,
       minZoom: 4,
-      canvasContextAttributes: { preserveDrawingBuffer: true },
+    });
+    map.on("error", (event) => {
+      const message = event.error?.message ?? "Map rendering failed";
+      if (!message.toLowerCase().includes("tile")) setMapError(message);
     });
     map.addControl(new NavigationControl({ showCompass: false }), "top-right");
     let pulseFrame = 0;
@@ -881,7 +1056,12 @@ export default function FireDashboard() {
         const name = normalizedIncidentName(properties.attr_IncidentName ?? properties.poly_IncidentName);
         const match = visibleFiresRef.current.find((feature) => comparableId(featureId(feature)) === comparableId(id))
           ?? visibleFiresRef.current.find((feature) => name && normalizedIncidentName(feature.properties.IncidentName) === name);
-        if (match) { setSelected(match); setSelectedEvacuation(null); }
+        if (match) {
+          const idMatch = comparableId(featureId(match));
+          setSelected(match);
+          setSelectedEvacuation(null);
+          updateFireParam(idMatch);
+        }
       };
       map.on("click", "fire-points", choose);
       map.on("click", "fire-perimeters-fill", choose);
@@ -890,6 +1070,16 @@ export default function FireDashboard() {
         const id = textValue(properties.ZONE_ID) ?? textValue(properties.GlobalID) ?? String(properties.OBJECTID ?? "");
         const match = visibleEvacuationsRef.current.find((feature) => evacuationId(feature) === id);
         if (match) { setSelectedEvacuation(match); setSelected(null); }
+      });
+      map.on("click", (event) => {
+        const hits = map.queryRenderedFeatures(event.point, {
+          layers: ["fire-points", "fire-perimeters-fill", "evacuations-fill"],
+        });
+        if (!hits.length) {
+          setSelected(null);
+          setSelectedEvacuation(null);
+          updateFireParam(null);
+        }
       });
       map.on("mouseenter", "fire-points", () => { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", "fire-points", () => { map.getCanvas().style.cursor = ""; });
@@ -920,6 +1110,17 @@ export default function FireDashboard() {
     };
     if (map.getSource("fires")) sync(); else map.once("load", sync);
   }, [displayData]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !displayData || selected || selectedEvacuation) return;
+    const bounds = dmaFeature?.geometry
+      ? geometryBounds(dmaFeature.geometry)
+      : collectionsBounds([displayData.fires, displayData.perimeters, displayData.evacuations]);
+    if (!bounds) return;
+    const timer = window.setTimeout(() => map.fitBounds(bounds, { padding: 36, duration: 700, maxZoom: 9 }), 80);
+    return () => window.clearTimeout(timer);
+  }, [displayData, dmaFeature, selected, selectedEvacuation]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -980,6 +1181,24 @@ export default function FireDashboard() {
   }, [selected]);
 
   useEffect(() => {
+    if (selected?.geometry?.type !== "Point") {
+      setNearbyCameras([]);
+      return;
+    }
+    const [longitude, latitude] = selected.geometry.coordinates as Position;
+    const controller = new AbortController();
+    setCamerasLoading(true);
+    fetch(`/api/cameras?lat=${latitude}&lon=${longitude}&limit=5`, { signal: controller.signal })
+      .then((response) => response.json())
+      .then((payload: { cameras?: NearbyCamera[] }) => setNearbyCameras(payload.cameras ?? []))
+      .catch((loadError) => {
+        if ((loadError as Error).name !== "AbortError") setNearbyCameras([]);
+      })
+      .finally(() => setCamerasLoading(false));
+    return () => controller.abort();
+  }, [selected]);
+
+  useEffect(() => {
     const source = mapRef.current?.getSource("growth-frame") as GeoJSONSource | undefined;
     const previousSource = mapRef.current?.getSource("growth-previous") as GeoJSONSource | undefined;
     const snapshot = history[historyIndex];
@@ -1029,6 +1248,21 @@ export default function FireDashboard() {
   }, [displayData]);
   const evacuationOrders = evacuations.filter((feature) => feature.properties.evacuationClass === "order").length;
   const evacuationWarnings = evacuations.filter((feature) => feature.properties.evacuationClass === "warning").length;
+  const totalTrackedAcres = sortedFires.reduce((sum, fire) => sum + (numberValue(fire.properties.IncidentSize) ?? 0), 0);
+  const perimeterUpdates24h = displayData?.perimeters.features.filter((perimeter) => {
+    const updated = numberValue(perimeter.properties.poly_PolygonDateTime ?? perimeter.properties.poly_DateCurrent);
+    return updated !== null && Date.now() - updated <= 86_400_000;
+  }).length ?? 0;
+  const metricCards: Record<MetricId, { label: string; value: string; accent?: boolean }> = {
+    tracked: { label: "TRACKED FIRES", value: displayData?.fires.features.length.toLocaleString() ?? "—" },
+    new: { label: "NEW • 24 HOURS", value: newFires.length.toLocaleString(), accent: true },
+    perimeters: { label: "LIVE PERIMETERS", value: displayData?.perimeters.features.length.toLocaleString() ?? "—" },
+    evacuations: { label: "EVAC ORDERS / WARNINGS", value: `${evacuationOrders} / ${evacuationWarnings}` },
+    hotspots: { label: "VIIRS HOTSPOTS • 24H", value: displayData?.hotspots.features.length.toLocaleString() ?? "—" },
+    following: { label: "FOLLOWED FIRES", value: activeFollowedFires.length.toLocaleString() },
+    acres: { label: "ACTIVE REPORTED ACRES", value: Math.round(totalTrackedAcres).toLocaleString() },
+    updated: { label: "PERIMETERS UPDATED • 24H", value: perimeterUpdates24h.toLocaleString() },
+  };
   const unavailableFeeds = data?.feedStatus
     ? Object.entries(data.feedStatus).filter(([, available]) => !available).map(([name]) => ({
       nifcIncidents: "NIFC incidents",
@@ -1153,13 +1387,26 @@ export default function FireDashboard() {
     ].filter(Boolean).join(", ") + ` (${locationLabel(selected.properties)}). Updated ${formatDate(data?.fetchedAt, true)}.`
     : "";
 
+  const fitFullCoverage = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    const bounds = dmaFeature?.geometry
+      ? geometryBounds(dmaFeature.geometry)
+      : displayData ? collectionsBounds([displayData.fires, displayData.perimeters, displayData.evacuations]) : null;
+    if (bounds) map.fitBounds(bounds, { padding: 36, duration: 700, maxZoom: 9 });
+  };
+
+  const clearSelection = () => {
+    setSelected(null);
+    setSelectedEvacuation(null);
+    updateFireParam(null);
+    window.requestAnimationFrame(fitFullCoverage);
+  };
+
   const selectFire = (fire: Feature) => {
     setSelected(fire);
     setSelectedEvacuation(null);
     updateFireParam(comparableId(featureId(fire)));
-    if (fire.geometry?.type === "Point") {
-      mapRef.current?.flyTo({ center: fire.geometry.coordinates as Position, zoom: 8, duration: 900 });
-    }
   };
 
   const selectEvacuation = (evacuation: Feature) => {
@@ -1330,11 +1577,10 @@ export default function FireDashboard() {
     }
   }, [displayData, dmaPreference, alertPreferences.coverageNewFires]);
 
-  const exportStill = () => {
+  const exportStill = async () => {
     if (!exportFrames.length) return;
-    frameCanvas(exportFrames, Math.min(historyIndex, exportFrames.length - 1)).toBlob((blob) => {
-      if (blob) downloadBlob(blob, `${exportFrames[0].incidentName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-growth.png`);
-    }, "image/png");
+    const canvas = await frameCanvas(exportFrames, Math.min(historyIndex, exportFrames.length - 1));
+    downloadBlob(await canvasBlob(canvas), `${safeFileName(exportFrames[0].incidentName)}-growth.png`);
   };
 
   const exportGif = async () => {
@@ -1353,7 +1599,7 @@ export default function FireDashboard() {
     try {
       const baseName = safeFileName(textValue(selected.properties.IncidentName) ?? "wildfire");
       const files: Array<{ name: string; blob: Blob }> = [];
-      files.push({ name: "graphics/fire-growth-16x9.png", blob: await canvasBlob(frameCanvas(exportFrames, Math.min(historyIndex, exportFrames.length - 1))) });
+      files.push({ name: "graphics/fire-growth-16x9.png", blob: await canvasBlob(await frameCanvas(exportFrames, Math.min(historyIndex, exportFrames.length - 1))) });
       if (exportFrames.length >= 2) files.push({ name: "graphics/fire-growth.gif", blob: await growthGifBlob(exportFrames) });
 
       const origin = selected.geometry?.type === "Point" ? selected.geometry.coordinates as Position : null;
@@ -1399,8 +1645,9 @@ export default function FireDashboard() {
     <div className="fire-list">
       {items.slice(0, 80).map((fire) => {
         const id = featureId(fire) ?? String(fire.properties.OBJECTID ?? fire.properties.IncidentName);
+        const isSelected = comparableId(featureId(selected)) === comparableId(featureId(fire));
         return (
-          <button key={id} className={`fire-row ${featureId(selected) === featureId(fire) ? "selected" : ""}`} onClick={() => selectFire(fire)}>
+          <button key={id} className={`fire-row ${isSelected ? "selected" : ""}`} onClick={() => isSelected ? clearSelection() : selectFire(fire)} aria-pressed={isSelected}>
             <span className={`fire-dot ${fire.properties.isNew === true ? "new" : ""}`} />
             <span className="fire-row-main">
               <strong>{textValue(fire.properties.IncidentName) ?? "Unnamed fire"}</strong>
@@ -1427,7 +1674,7 @@ export default function FireDashboard() {
         const id = evacuationId(evacuation) ?? evacuationLabel(evacuation);
         const statusClass = textValue(evacuation.properties.evacuationClass) ?? "other";
         return (
-          <button key={id} className={`fire-row evacuation-row ${evacuationId(selectedEvacuation) === evacuationId(evacuation) ? "selected" : ""}`} onClick={() => selectEvacuation(evacuation)}>
+          <button key={id} className={`fire-row evacuation-row ${evacuationId(selectedEvacuation) === evacuationId(evacuation) ? "selected" : ""}`} onClick={() => evacuationId(selectedEvacuation) === evacuationId(evacuation) ? clearSelection() : selectEvacuation(evacuation)}>
             <span className={`evacuation-dot ${statusClass}`} />
             <span className="fire-row-main">
               <strong>{evacuationLabel(evacuation)}</strong>
@@ -1460,13 +1707,13 @@ export default function FireDashboard() {
         </div>
       </header>
 
-      <section className="stat-strip" aria-label="California fire and evacuation summary">
-        <div><span>TRACKED FIRES</span><strong>{displayData?.fires.features.length.toLocaleString() ?? "—"}</strong></div>
-        <div><span>NEW • 24 HOURS</span><strong className="accent">{newFires.length.toLocaleString()}</strong></div>
-        <div><span>LIVE PERIMETERS</span><strong>{displayData?.perimeters.features.length.toLocaleString() ?? "—"}</strong></div>
-        <div><span>EVAC ORDERS / WARNINGS</span><strong>{evacuationOrders} / {evacuationWarnings}</strong></div>
-        <div><span>VIIRS HOTSPOTS • 24H</span><strong>{displayData?.hotspots.features.length.toLocaleString() ?? "—"}</strong></div>
-      </section>
+      {metricPreferences.length > 0 && (
+        <section className="stat-strip" aria-label="California fire and evacuation summary" style={{ gridTemplateColumns: `repeat(${metricPreferences.length}, minmax(0, 1fr))` }}>
+          {metricPreferences.map((id) => (
+            <div key={id}><span>{metricCards[id].label}</span><strong className={metricCards[id].accent ? "accent" : ""}>{metricCards[id].value}</strong></div>
+          ))}
+        </section>
+      )}
 
       {error && <div className="error-banner"><CircleAlert size={17} /> {error}</div>}
       {!error && unavailableFeeds.length > 0 && <div className="feed-warning"><CircleAlert size={15} /> Partial update: {unavailableFeeds.join(", ")} unavailable. Other California feeds remain live.</div>}
@@ -1506,8 +1753,13 @@ export default function FireDashboard() {
         </aside>
 
         <section className="map-panel">
+          <OverviewFallbackMap data={displayData} coverage={dmaFeature} />
           <div ref={mapContainer} className="map-canvas" aria-label="Interactive wildfire map" />
+          {mapError && <div className="map-error"><CircleAlert size={16} /> Map tiles could not load. <button onClick={() => window.location.reload()}>Retry</button></div>}
           <div className="map-tools">
+            <Button variant="secondary" size="sm" onClick={clearSelection}>
+              <MapPin size={15} /> Entire DMA
+            </Button>
             <Button className={hotspotsOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setHotspotsOn((value) => !value)}>
               <Satellite size={15} /> VIIRS hotspots
             </Button>
@@ -1575,6 +1827,7 @@ export default function FireDashboard() {
           ) : (
             <>
               <div className="detail-heading">
+                <button className="detail-close" onClick={clearSelection} aria-label="Close fire details and show entire DMA"><X size={16} /></button>
                 <span>{selected.properties.isNew === true ? `${textValue(selected.properties.reportingStatus) ?? "PRELIMINARY"} • NEW START` : "ACTIVE INCIDENT"}</span>
                 <h2>{textValue(selected.properties.IncidentName) ?? "Unnamed fire"}</h2>
                 <p>{locationLabel(selected.properties)}</p>
@@ -1600,6 +1853,22 @@ export default function FireDashboard() {
                 {(numberValue(selected.properties.sourceReports) ?? 1) > 1 && <small>{numberValue(selected.properties.sourceReports)} matching source reports merged</small>}
                 {selectedPerimeter && <small>Latest perimeter: {textValue(selectedPerimeter.properties.perimeterSource) ?? "CAL FIRE / FIRIS / NIFC"} • {formatAcres(selectedPerimeter.properties.poly_Acres_AutoCalc)}</small>}
               </div>
+
+              <section className="camera-card">
+                <div className="section-title"><Video size={15} /><span>Five closest ALERTCalifornia cameras</span></div>
+                {camerasLoading ? <div className="inline-loading"><LoaderCircle className="spin" size={15} /> Finding nearby cameras…</div> : nearbyCameras.length ? (
+                  <ol className="camera-list">
+                    {nearbyCameras.map((camera) => (
+                      <li key={camera.cameraId}>
+                        <a href={camera.url} target="_blank" rel="noreferrer">
+                          <span><strong>{camera.name}</strong><small>{camera.county ? `${camera.county} • ` : ""}{camera.distanceMiles.toFixed(1)} miles away</small></span>
+                          <ExternalLink size={14} />
+                        </a>
+                      </li>
+                    ))}
+                  </ol>
+                ) : <div className="image-unavailable">Nearby camera links are temporarily unavailable.</div>}
+              </section>
 
               <section className="share-card">
                 <div className="section-title"><Link2 size={15} /><span>Share</span></div>
@@ -1679,22 +1948,6 @@ export default function FireDashboard() {
                 ) : <p className="growth-delta neutral">Select any frame after the first to compare it with the immediately preceding perimeter.</p>}
               </section>
 
-              <section className="conditions-card">
-                <div className="section-title"><Wind size={15} /><span>Wind, weather, smoke & AQI</span>{conditions && <b>{relativeTime(conditions.updatedAt)}</b>}</div>
-                {conditionsLoading ? <div className="inline-loading"><LoaderCircle className="spin" size={15} /> Loading current conditions…</div> : conditions ? (
-                  <>
-                    <div className="conditions-grid">
-                      <div><Wind size={16} /><span>Wind</span><strong>{conditions.weather.windDirection ?? "—"} {conditions.weather.windMph !== null ? `${Math.round(conditions.weather.windMph)} mph` : ""}</strong><small>Gusts {conditions.weather.windGustMph !== null ? `${Math.round(conditions.weather.windGustMph)} mph` : "—"}</small></div>
-                      <div><Thermometer size={16} /><span>Temperature</span><strong>{conditions.weather.temperatureF !== null ? `${Math.round(conditions.weather.temperatureF)}°F` : "—"}</strong><small>{conditions.weather.humidityPercent !== null ? `${Math.round(conditions.weather.humidityPercent)}% humidity` : "Humidity unavailable"}</small></div>
-                      <div><Cloud size={16} /><span>Air quality</span><strong>AQI {conditions.airQuality.aqi !== null ? Math.round(conditions.airQuality.aqi) : "—"}</strong><small>{aqiLabel(conditions.airQuality.aqi)}</small></div>
-                      <div><Satellite size={16} /><span>Smoke signal</span><strong>{conditions.airQuality.smokeSignal ? "Elevated PM2.5" : "Not elevated"}</strong><small>{conditions.airQuality.pm25 !== null ? `${conditions.airQuality.pm25.toFixed(1)} µg/m³ PM2.5` : "PM2.5 unavailable"}</small></div>
-                    </div>
-                    {conditions.alerts.length > 0 && <div className="weather-alerts">{conditions.alerts.map((alert, index) => <div key={alert.id ?? `${alert.event}-${index}`}><CircleAlert size={14} /><span><strong>{alert.event}</strong><small>{alert.headline ?? `${alert.severity} • ${alert.urgency}`}</small></span></div>)}</div>}
-                    <p className="conditions-source">Weather: Open-Meteo forecast models • Air quality: CAMS forecast • Alerts: National Weather Service. Conditions are guidance, not a fire-spread prediction.</p>
-                  </>
-                ) : <div className="image-unavailable">Current weather and air-quality data are unavailable for this fire.</div>}
-              </section>
-
               <section className="timeline-card">
                 <div className="section-title"><Clock size={15} /><span>Fire intelligence timeline</span><b>{intelligenceTimeline.length} events</b></div>
                 {intelligenceTimeline.length ? <ol className="intelligence-timeline">{intelligenceTimeline.map((item, index) => (
@@ -1718,9 +1971,7 @@ export default function FireDashboard() {
                 {exportFrames.length ? (
                   <>
                     <div className="growth-preview">
-                      <div className="growth-ring" />
-                      <strong>{formatAcres(exportFrames[Math.min(historyIndex, exportFrames.length - 1)]?.acres)}</strong>
-                      <span>{formatDate(exportFrames[Math.min(historyIndex, exportFrames.length - 1)]?.perimeterDate ?? exportFrames[Math.min(historyIndex, exportFrames.length - 1)]?.capturedAt, true)}</span>
+                      <GrowthMapPreview snapshots={exportFrames} activeIndex={historyIndex} />
                     </div>
                     <Slider
                       aria-label="Growth frame"
@@ -1733,7 +1984,7 @@ export default function FireDashboard() {
                     />
                     {exportFrames.length < 2 && <p className="history-note">The first perimeter is saved. GIF export activates after NIFC publishes another changed shape.</p>}
                     <div className="export-actions">
-                      <Button variant="secondary" onClick={exportStill}><ImageDown size={15} /> PNG \u2022 720p</Button>
+                      <Button variant="secondary" onClick={() => void exportStill()}><ImageDown size={15} /> PNG \u2022 720p</Button>
                       <Button onClick={() => void exportGif()} disabled={exportFrames.length < 2 || exporting}>
                         {exporting ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />} Growth GIF \u2022 720p
                       </Button>
