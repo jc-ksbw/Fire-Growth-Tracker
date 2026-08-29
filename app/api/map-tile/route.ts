@@ -1,3 +1,5 @@
+import { env } from "cloudflare:workers";
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const z = Number(url.searchParams.get("z"));
@@ -6,7 +8,10 @@ export async function GET(request: Request) {
   if (![z, x, y].every(Number.isInteger) || z < 0 || z > 18 || x < 0 || y < 0) {
     return new Response("Invalid tile", { status: 400 });
   }
-  const tile = await fetch(`https://basemaps.cartocdn.com/light_all/${z}/${x}/${y}.png`, {
+  const tileUrl = new URL(`https://basemaps.cartocdn.com/light_all/${z}/${x}/${y}.png`);
+  const cartoApiKey = typeof env.CARTO_API_KEY === "string" ? env.CARTO_API_KEY.trim() : "";
+  if (cartoApiKey) tileUrl.searchParams.set("key", cartoApiKey);
+  const tile = await fetch(tileUrl, {
     headers: { Accept: "image/png" },
   });
   if (!tile.ok || !tile.body) return new Response("Tile unavailable", { status: 502 });

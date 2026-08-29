@@ -29,7 +29,6 @@ import {
   Thermometer,
   TrendingUp,
   Video,
-  Wind,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -224,16 +223,6 @@ function browserNotify(title: string, body: string) {
   if ("Notification" in window && Notification.permission === "granted") {
     new Notification(title, { body, icon: "/favicon.svg", tag: `${title}-${body}` });
   }
-}
-
-function aqiLabel(value: number | null) {
-  if (value === null) return "Unavailable";
-  if (value <= 50) return "Good";
-  if (value <= 100) return "Moderate";
-  if (value <= 150) return "Unhealthy for sensitive groups";
-  if (value <= 200) return "Unhealthy";
-  if (value <= 300) return "Very unhealthy";
-  return "Hazardous";
 }
 
 function safeFileName(value: string) {
@@ -709,7 +698,12 @@ function GrowthMapPreview({ snapshots, activeIndex }: { snapshots: Snapshot[]; a
   return <canvas ref={previewRef} className="growth-map-preview" aria-label="Fire perimeter map preview" />;
 }
 
-function OverviewFallbackMap({ data, coverage }: { data: DashboardData | null; coverage: DmaFeature | null }) {
+function OverviewFallbackMap({ data, coverage, perimetersOn, evacuationsOn }: {
+  data: DashboardData | null;
+  coverage: DmaFeature | null;
+  perimetersOn: boolean;
+  evacuationsOn: boolean;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     let cancelled = false;
@@ -763,8 +757,22 @@ function OverviewFallbackMap({ data, coverage }: { data: DashboardData | null; c
       if (cancelled) return;
       context.fillStyle = "rgba(10,15,17,.16)";
       context.fillRect(0, 0, canvas.width, canvas.height);
-      for (const zone of data.evacuations.features) if (zone.geometry) drawGeometry(zone.geometry, "rgba(226,63,50,.22)", "#e23f32", 2);
-      for (const perimeter of data.perimeters.features) if (perimeter.geometry) drawGeometry(perimeter.geometry, "rgba(239,67,43,.34)", "#ff8a3d", 3);
+      if (evacuationsOn) {
+        for (const zone of data.evacuations.features) {
+          if (!zone.geometry) continue;
+          const classification = textValue(zone.properties.evacuationClass) ?? "other";
+          const colors: Record<string, [string, string]> = {
+            order: ["rgba(226,63,50,.26)", "#e23f32"],
+            warning: ["rgba(244,197,66,.25)", "#f4c542"],
+            shelter: ["rgba(165,109,226,.25)", "#a56de2"],
+          };
+          const [fill, stroke] = colors[classification] ?? ["rgba(138,164,177,.22)", "#8aa4b1"];
+          drawGeometry(zone.geometry, fill, stroke, 2);
+        }
+      }
+      if (perimetersOn) {
+        for (const perimeter of data.perimeters.features) if (perimeter.geometry) drawGeometry(perimeter.geometry, "rgba(239,67,43,.34)", "#ff8a3d", 3);
+      }
       for (const fire of data.fires.features) {
         if (fire.geometry?.type !== "Point") continue;
         const [x, y] = project(fire.geometry.coordinates as Position);
@@ -774,7 +782,7 @@ function OverviewFallbackMap({ data, coverage }: { data: DashboardData | null; c
       }
     });
     return () => { cancelled = true; };
-  }, [data, coverage]);
+  }, [data, coverage, perimetersOn, evacuationsOn]);
   return <canvas ref={canvasRef} className="fallback-map" aria-hidden="true" />;
 }
 
@@ -796,10 +804,9 @@ export default function FireDashboard() {
   const [dmaPreference, setDmaPreference] = useState<DmaPreference | null>(null);
   const [dmaFeature, setDmaFeature] = useState<DmaFeature | null>(null);
   const [heatmapOn, setHeatmapOn] = useState(false);
-  const [comparisonOn, setComparisonOn] = useState(true);
-  const [conditionsOn, setConditionsOn] = useState(true);
+  const [perimetersOn, setPerimetersOn] = useState(true);
+  const [evacuationsOn, setEvacuationsOn] = useState(true);
   const [conditions, setConditions] = useState<FireConditions | null>(null);
-  const [conditionsLoading, setConditionsLoading] = useState(false);
   const [alertPreferences, setAlertPreferences] = useState<AlertPreferences>(DEFAULT_ALERTS);
   const [followedFires, setFollowedFires] = useState<FollowedFire[]>([]);
   const [newsroomExporting, setNewsroomExporting] = useState(false);
@@ -1024,32 +1031,6 @@ export default function FireDashboard() {
           "circle-stroke-width": 0,
         },
       }, "fire-points");
-      map.addSource("growth-frame", { type: "geojson", data: EMPTY as never });
-      map.addSource("growth-previous", { type: "geojson", data: EMPTY as never });
-      map.addLayer({
-        id: "growth-previous-fill",
-        type: "fill",
-        source: "growth-previous",
-        paint: { "fill-color": "#3f8dcb", "fill-opacity": 0.23 },
-      });
-      map.addLayer({
-        id: "growth-previous-line",
-        type: "line",
-        source: "growth-previous",
-        paint: { "line-color": "#83c7ff", "line-width": 2.5, "line-dasharray": [2, 1.5] },
-      });
-      map.addLayer({
-        id: "growth-frame-fill",
-        type: "fill",
-        source: "growth-frame",
-        paint: { "fill-color": "#ef432b", "fill-opacity": 0.42 },
-      });
-      map.addLayer({
-        id: "growth-frame-line",
-        type: "line",
-        source: "growth-frame",
-        paint: { "line-color": "#ffd166", "line-width": 3 },
-      });
       const choose = (event: { features?: Array<{ properties: Record<string, unknown> }> }) => {
         const properties = event.features?.[0]?.properties ?? {};
         const id = textValue(properties.IrwinID)
@@ -1181,6 +1162,22 @@ export default function FireDashboard() {
   }, [heatmapOn]);
 
   useEffect(() => {
+    const map = mapRef.current;
+    if (!map?.getLayer("fire-perimeters-fill")) return;
+    for (const layer of ["fire-perimeters-fill", "fire-perimeters-line"]) {
+      map.setLayoutProperty(layer, "visibility", perimetersOn ? "visible" : "none");
+    }
+  }, [perimetersOn, mapReady]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map?.getLayer("evacuations-fill")) return;
+    for (const layer of ["evacuations-fill", "evacuations-line"]) {
+      map.setLayoutProperty(layer, "visibility", evacuationsOn ? "visible" : "none");
+    }
+  }, [evacuationsOn, mapReady]);
+
+  useEffect(() => {
     const id = featureId(selected);
     if (!id) { setHistory([]); return; }
     setHistory([]);
@@ -1202,7 +1199,6 @@ export default function FireDashboard() {
     }
     const [longitude, latitude] = selected.geometry.coordinates as Position;
     const controller = new AbortController();
-    setConditionsLoading(true);
     fetch(`/api/conditions?lat=${latitude}&lon=${longitude}`, { signal: controller.signal })
       .then(async (response) => {
         const payload = await response.json() as FireConditions;
@@ -1211,8 +1207,7 @@ export default function FireDashboard() {
       })
       .catch((loadError) => {
         if ((loadError as Error).name !== "AbortError") setConditions(null);
-      })
-      .finally(() => setConditionsLoading(false));
+      });
     return () => controller.abort();
   }, [selected]);
 
@@ -1233,27 +1228,6 @@ export default function FireDashboard() {
       .finally(() => setCamerasLoading(false));
     return () => controller.abort();
   }, [selected]);
-
-  useEffect(() => {
-    const source = mapRef.current?.getSource("growth-frame") as GeoJSONSource | undefined;
-    const previousSource = mapRef.current?.getSource("growth-previous") as GeoJSONSource | undefined;
-    const snapshot = history[historyIndex];
-    const previous = history[historyIndex - 1];
-    source?.setData(snapshot
-      ? { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: snapshot.geometry }] } as never
-      : EMPTY as never);
-    previousSource?.setData(previous
-      ? { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: previous.geometry }] } as never
-      : EMPTY as never);
-  }, [history, historyIndex]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map?.getLayer("growth-frame-fill")) return;
-    for (const layer of ["growth-frame-fill", "growth-frame-line", "growth-previous-fill", "growth-previous-line"]) {
-      map.setLayoutProperty(layer, "visibility", comparisonOn ? "visible" : "none");
-    }
-  }, [comparisonOn]);
 
   const sortedFires = useMemo(() => {
     if (!displayData) return [];
@@ -1789,12 +1763,18 @@ export default function FireDashboard() {
         </aside>
 
         <section className="map-panel">
-          {!mapReady && <OverviewFallbackMap data={displayData} coverage={dmaFeature} />}
+          {!mapReady && <OverviewFallbackMap data={displayData} coverage={dmaFeature} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} />}
           <div ref={mapContainer} className="map-canvas" aria-label="Interactive wildfire map" />
           {mapError && <div className="map-error"><CircleAlert size={16} /> Map tiles could not load. <button onClick={() => window.location.reload()}>Retry</button></div>}
           <div className="map-tools">
             <Button variant="secondary" size="sm" onClick={clearSelection}>
               <MapPin size={15} /> Entire DMA
+            </Button>
+            <Button className={perimetersOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setPerimetersOn((value) => !value)}>
+              <Layers3 size={15} /> Perimeters
+            </Button>
+            <Button className={evacuationsOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setEvacuationsOn((value) => !value)}>
+              <ShieldAlert size={15} /> Evacuations
             </Button>
             <Button className={hotspotsOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setHotspotsOn((value) => !value)}>
               <Satellite size={15} /> VIIRS hotspots
@@ -1802,35 +1782,14 @@ export default function FireDashboard() {
             <Button className={heatmapOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setHeatmapOn((value) => !value)}>
               <Thermometer size={15} /> Heat map
             </Button>
-            <Button className={comparisonOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setComparisonOn((value) => !value)} disabled={history.length < 2}>
-              <Layers3 size={15} /> Compare
-            </Button>
-            <Button className={conditionsOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setConditionsOn((value) => !value)} disabled={!selected}>
-              <Wind size={15} /> Conditions
-            </Button>
           </div>
-          {conditionsOn && selected && (
-            <div className="conditions-overlay">
-              {conditionsLoading ? <><LoaderCircle className="spin" size={15} /> Loading conditions…</> : conditions ? (
-                <>
-                  <span className="wind-arrow" style={{ transform: `rotate(${conditions.weather.windDirectionDegrees ?? 0}deg)` }}>↑</span>
-                  <div><strong>{conditions.weather.windDirection ?? "—"} {conditions.weather.windMph !== null ? `${Math.round(conditions.weather.windMph)} mph` : ""}</strong><small>Gusts {conditions.weather.windGustMph !== null ? `${Math.round(conditions.weather.windGustMph)} mph` : "—"}</small></div>
-                  <div><strong>AQI {conditions.airQuality.aqi !== null ? Math.round(conditions.airQuality.aqi) : "—"}</strong><small>{aqiLabel(conditions.airQuality.aqi)}</small></div>
-                  {conditions.alerts.length > 0 && <b><CircleAlert size={13} /> {conditions.alerts[0].event}</b>}
-                </>
-              ) : <span>Conditions unavailable</span>}
-            </div>
-          )}
           <div className="map-legend">
             <span><i className="legend-new" /> New start</span>
             <span><i className="legend-fire" /> Active fire</span>
-            <span><i className="legend-perimeter" /> Reported perimeter</span>
+            {perimetersOn && <span><i className="legend-perimeter" /> Reported perimeter</span>}
             <span><i className="legend-hotspot" /> Thermal hotspot</span>
             {heatmapOn && <span><i className="legend-heat" /> Heat intensity</span>}
-            {comparisonOn && history.length > 1 && <><span><i className="legend-previous" /> Previous perimeter</span><span><i className="legend-current" /> Selected perimeter</span></>}
-            <span><i className="legend-evac-order" /> Evac order</span>
-            <span><i className="legend-evac-warning" /> Warning</span>
-            <span><i className="legend-shelter" /> Shelter in place</span>
+            {evacuationsOn && <><span><i className="legend-evac-order" /> Evac order</span><span><i className="legend-evac-warning" /> Warning</span><span><i className="legend-shelter" /> Shelter in place</span></>}
           </div>
         </section>
 
