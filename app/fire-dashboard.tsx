@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Map, NavigationControl, type GeoJSONSource } from "maplibre-gl";
+import { Map, Marker, NavigationControl, type GeoJSONSource } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {
   Archive,
@@ -781,6 +781,7 @@ function OverviewFallbackMap({ data, coverage }: { data: DashboardData | null; c
 export default function FireDashboard() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
+  const fireMarkersRef = useRef<Marker[]>([]);
   const visibleFiresRef = useRef<Feature[]>([]);
   const visibleEvacuationsRef = useRef<Feature[]>([]);
   const [data, setData] = useState<DashboardData | null>(null);
@@ -808,6 +809,7 @@ export default function FireDashboard() {
   const [nearbyCameras, setNearbyCameras] = useState<NearbyCamera[]>([]);
   const [camerasLoading, setCamerasLoading] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
+  const [mapReady, setMapReady] = useState(false);
   const deepLinkAppliedRef = useRef(false);
   const seenFiresRef = useRef<Record<string, number> | null>(null);
   const feedStatusRef = useRef<Record<string, boolean> | null>(null);
@@ -1094,9 +1096,16 @@ export default function FireDashboard() {
         pulseFrame = requestAnimationFrame(animatePulse);
       };
       pulseFrame = requestAnimationFrame(animatePulse);
+      setMapReady(true);
     });
     mapRef.current = map;
-    return () => { cancelAnimationFrame(pulseFrame); map.remove(); mapRef.current = null; };
+    return () => {
+      cancelAnimationFrame(pulseFrame);
+      fireMarkersRef.current.forEach((marker) => marker.remove());
+      fireMarkersRef.current = [];
+      map.remove();
+      mapRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -1107,9 +1116,36 @@ export default function FireDashboard() {
       (map.getSource("fire-perimeters") as GeoJSONSource | undefined)?.setData(displayData.perimeters as never);
       (map.getSource("evacuations") as GeoJSONSource | undefined)?.setData(displayData.evacuations as never);
       (map.getSource("hotspots") as GeoJSONSource | undefined)?.setData(displayData.hotspots as never);
+
+      fireMarkersRef.current.forEach((marker) => marker.remove());
+      fireMarkersRef.current = displayData.fires.features.flatMap((fire) => {
+        if (fire.geometry?.type !== "Point") return [];
+        const [longitude, latitude] = fire.geometry.coordinates as Position;
+        if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return [];
+        const element = document.createElement("button");
+        element.type = "button";
+        element.className = `fire-map-marker${fire.properties.isNew === true ? " new" : ""}`;
+        element.title = textValue(fire.properties.IncidentName) ?? "Active fire";
+        element.setAttribute("aria-label", `Select ${element.title}`);
+        element.addEventListener("click", (event) => {
+          event.stopPropagation();
+          setSelected(fire);
+          setSelectedEvacuation(null);
+          updateFireParam(comparableId(featureId(fire)));
+        });
+        return [new Marker({ element, anchor: "center" }).setLngLat([longitude, latitude]).addTo(map)];
+      });
     };
     if (map.getSource("fires")) sync(); else map.once("load", sync);
   }, [displayData]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || selected?.geometry?.type !== "Point") return;
+    const [longitude, latitude] = selected.geometry.coordinates as Position;
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return;
+    map.easeTo({ center: [longitude, latitude], zoom: Math.max(map.getZoom(), 9), duration: 700 });
+  }, [selected]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1753,7 +1789,7 @@ export default function FireDashboard() {
         </aside>
 
         <section className="map-panel">
-          <OverviewFallbackMap data={displayData} coverage={dmaFeature} />
+          {!mapReady && <OverviewFallbackMap data={displayData} coverage={dmaFeature} />}
           <div ref={mapContainer} className="map-canvas" aria-label="Interactive wildfire map" />
           {mapError && <div className="map-error"><CircleAlert size={16} /> Map tiles could not load. <button onClick={() => window.location.reload()}>Retry</button></div>}
           <div className="map-tools">
