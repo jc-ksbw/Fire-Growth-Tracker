@@ -1251,7 +1251,7 @@ export default function FireDashboard() {
   const totalTrackedAcres = sortedFires.reduce((sum, fire) => sum + (numberValue(fire.properties.IncidentSize) ?? 0), 0);
   const perimeterUpdates24h = displayData?.perimeters.features.filter((perimeter) => {
     const updated = numberValue(perimeter.properties.poly_PolygonDateTime ?? perimeter.properties.poly_DateCurrent);
-    return updated !== null && Date.now() - updated <= 86_400_000;
+    return updated !== null && displayData.fetchedAt - updated <= 86_400_000;
   }).length ?? 0;
   const metricCards: Record<MetricId, { label: string; value: string; accent?: boolean }> = {
     tracked: { label: "TRACKED FIRES", value: displayData?.fires.features.length.toLocaleString() ?? "—" },
@@ -1647,7 +1647,7 @@ export default function FireDashboard() {
         const id = featureId(fire) ?? String(fire.properties.OBJECTID ?? fire.properties.IncidentName);
         const isSelected = comparableId(featureId(selected)) === comparableId(featureId(fire));
         return (
-          <button key={id} className={`fire-row ${isSelected ? "selected" : ""}`} onClick={() => isSelected ? clearSelection() : selectFire(fire)} aria-pressed={isSelected}>
+          <button key={id} className={`fire-row ${isSelected ? "selected" : ""}`} onClick={isSelected ? clearSelection : () => selectFire(fire)} aria-pressed={isSelected}>
             <span className={`fire-dot ${fire.properties.isNew === true ? "new" : ""}`} />
             <span className="fire-row-main">
               <strong>{textValue(fire.properties.IncidentName) ?? "Unnamed fire"}</strong>
