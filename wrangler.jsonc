@@ -17,7 +17,7 @@
     {
       "binding": "DB",
       "database_name": "fire-growth-tracker-db",
-      "database_id": "00000000-0000-4000-8000-000000000000"
+      "database_id": "a43688ed-f459-4a6d-a041-cde30452c403"
     }
   ],
   "triggers": {
