@@ -51,7 +51,7 @@ export async function GET(request: Request) {
   const [weatherResult, airResult, alertsResult] = await Promise.allSettled([
     fetchJson(forecastUrl.toString(), "Weather forecast"),
     fetchJson(airUrl.toString(), "Air-quality forecast"),
-    fetchJson(alertsUrl, "NWS alerts", { "User-Agent": "FireGrowthTracker/1.0 (https://fire-growth-tracker.hearst-6512.chatgpt.site)" }),
+    fetchJson(alertsUrl, "NWS alerts", { "User-Agent": "FireGrowthTracker/1.0 (https://github.com/jc-ksbw/Fire-Growth-Tracker)" }),
   ]);
 
   const weather = weatherResult.status === "fulfilled" ? asObject(weatherResult.value.current) : {};
