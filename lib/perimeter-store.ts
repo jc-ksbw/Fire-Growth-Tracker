@@ -51,23 +51,42 @@ export async function seedHistoricalPerimeters() {
        AND lower(replace(replace(irwin_id, '{', ''), '}', '')) IN
            ('51374d2c-d96b-40f7-940b-6cb8e0a483a2', 'c257fba6-f90e-431f-9464-067e8fbf79d7')`,
   ).all<{ seeded: number }>();
-  if ((status.results?.[0]?.seeded ?? 0) >= 6) return 0;
-
-  const rows = await historicalSeedRows();
-  const statements = rows.map((row) => db.prepare(
-    `INSERT OR IGNORE INTO perimeter_snapshots
-     (irwin_id, unique_fire_id, incident_name, version_key, captured_at,
-      perimeter_date, acres, contained, state, county, geometry_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(
-    row.irwinId, row.uniqueFireId, row.incidentName, row.versionKey,
-    row.capturedAt, row.perimeterDate, row.acres, row.contained,
-    row.state, row.county, row.geometryJson,
-  ));
-  for (let i = 0; i < statements.length; i += 2) {
-    await db.batch(statements.slice(i, i + 2));
+  let inserted = 0;
+  if ((status.results?.[0]?.seeded ?? 0) < 6) {
+    const rows = await historicalSeedRows();
+    const statements = rows.map((row) => db.prepare(
+      `INSERT OR IGNORE INTO perimeter_snapshots
+       (irwin_id, unique_fire_id, incident_name, version_key, captured_at,
+        perimeter_date, acres, contained, state, county, geometry_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      row.irwinId, row.uniqueFireId, row.incidentName, row.versionKey,
+      row.capturedAt, row.perimeterDate, row.acres, row.contained,
+      row.state, row.county, row.geometryJson,
+    ));
+    for (let i = 0; i < statements.length; i += 2) {
+      await db.batch(statements.slice(i, i + 2));
+    }
+    inserted = rows.length;
   }
-  return rows.length;
+
+  // Older releases used more than one identifier/version format and could
+  // leave duplicate same-day rows. Keep the newest capture for each fire/day.
+  await db.prepare(
+    `DELETE FROM perimeter_snapshots
+     WHERE rowid IN (
+       SELECT rowid FROM (
+         SELECT rowid,
+                ROW_NUMBER() OVER (
+                  PARTITION BY lower(replace(replace(irwin_id, '{', ''), '}', '')),
+                               substr(datetime(captured_at / 1000, 'unixepoch'), 1, 10)
+                  ORDER BY captured_at DESC, COALESCE(perimeter_date, 0) DESC, rowid DESC
+                ) AS daily_rank
+         FROM perimeter_snapshots
+       ) WHERE daily_rank > 1
+     )`,
+  ).run();
+  return inserted;
 }
 
 export async function savePerimeterSnapshots(features: PerimeterFeature[]) {
@@ -210,12 +229,21 @@ export async function getPerimeterHistory(irwinId: string) {
   const normalizedIrwinId = irwinId.replace(/[{}]/g, "").toLowerCase();
   const result = await getBinding()
     .prepare(
-      `SELECT incident_name, captured_at, perimeter_date, acres, contained,
+      `WITH ranked AS (
+         SELECT incident_name, captured_at, perimeter_date, acres, contained,
+                state, county, geometry_json,
+                ROW_NUMBER() OVER (
+                  PARTITION BY substr(datetime(captured_at / 1000, 'unixepoch'), 1, 10)
+                  ORDER BY captured_at DESC, COALESCE(perimeter_date, 0) DESC, rowid DESC
+                ) AS daily_rank
+         FROM perimeter_snapshots
+         WHERE lower(replace(replace(irwin_id, '{', ''), '}', '')) = ?
+       )
+       SELECT incident_name, captured_at, perimeter_date, acres, contained,
               state, county, geometry_json
-       FROM perimeter_snapshots
-       WHERE lower(replace(replace(irwin_id, '{', ''), '}', '')) = ?
+       FROM ranked WHERE daily_rank = 1
        ORDER BY COALESCE(perimeter_date, captured_at) ASC
-       LIMIT 80`,
+       LIMIT 20`,
     )
     .bind(normalizedIrwinId)
     .all<{
