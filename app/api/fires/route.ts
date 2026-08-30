@@ -127,25 +127,6 @@ function distanceKm(a: [number, number], b: [number, number]) {
   return 6371 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
-const CALIFORNIA_OUTLINE: Array<[number, number]> = [
-  [-124.42, 42.01], [-120.0, 42.01], [-120.0, 39.0], [-119.1, 37.2],
-  [-117.0, 35.0], [-114.63, 35.0], [-114.48, 34.15], [-114.72, 32.72],
-  [-117.12, 32.53], [-117.9, 33.2], [-118.5, 33.75], [-119.7, 34.4],
-  [-120.65, 35.1], [-121.2, 36.0], [-121.95, 36.65], [-122.5, 37.8],
-  [-123.8, 39.0], [-124.42, 42.01],
-];
-
-function isInCalifornia([longitude, latitude]: [number, number]) {
-  let inside = false;
-  for (let i = 0, j = CALIFORNIA_OUTLINE.length - 1; i < CALIFORNIA_OUTLINE.length; j = i, i += 1) {
-    const [xi, yi] = CALIFORNIA_OUTLINE[i];
-    const [xj, yj] = CALIFORNIA_OUTLINE[j];
-    if (yi > latitude !== yj > latitude
-      && longitude < ((xj - xi) * (latitude - yi)) / ((yj - yi) || Number.EPSILON) + xi) inside = !inside;
-  }
-  return inside;
-}
-
 function incidentDate(feature: Feature) {
   return number(feature.properties.FireDiscoveryDateTime)
     ?? number(feature.properties.CreatedOnDateTime)
@@ -361,13 +342,10 @@ export async function GET() {
   const perimeters = dedupePerimeters(value(1));
   const cwi = value(2);
   const evacuations = dedupeEvacuations(value(3));
-  const hotspots = {
-    type: "FeatureCollection",
-    features: value(4).features.filter((feature) => {
-      const coordinates = point(feature);
-      return coordinates ? isInCalifornia(coordinates) : false;
-    }),
-  } satisfies FeatureCollection;
+  // NOAA is already queried with a California bounding envelope. The precise
+  // selected-DMA polygon is applied in the client; a simplified state outline
+  // incorrectly excluded the Big Sur coast, including Timber and Plaskett.
+  const hotspots = value(4);
   if (results[0].status === "rejected" && results[2].status === "rejected") {
     const message = results[0].reason instanceof Error ? results[0].reason.message : "California fire feeds are unavailable";
     return Response.json({ error: message }, { status: 502 });
