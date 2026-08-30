@@ -698,11 +698,12 @@ function GrowthMapPreview({ snapshots, activeIndex }: { snapshots: Snapshot[]; a
   return <canvas ref={previewRef} className="growth-map-preview" aria-label="Fire perimeter map preview" />;
 }
 
-function OverviewFallbackMap({ data, coverage, perimetersOn, evacuationsOn }: {
+function OverviewFallbackMap({ data, coverage, perimetersOn, evacuationsOn, hotspotsOn }: {
   data: DashboardData | null;
   coverage: DmaFeature | null;
   perimetersOn: boolean;
   evacuationsOn: boolean;
+  hotspotsOn: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -773,6 +774,16 @@ function OverviewFallbackMap({ data, coverage, perimetersOn, evacuationsOn }: {
       if (perimetersOn) {
         for (const perimeter of data.perimeters.features) if (perimeter.geometry) drawGeometry(perimeter.geometry, "rgba(239,67,43,.34)", "#ff8a3d", 3);
       }
+      if (hotspotsOn) {
+        for (const hotspot of data.hotspots.features) {
+          if (hotspot.geometry?.type !== "Point") continue;
+          const [x, y] = project(hotspot.geometry.coordinates as Position);
+          const hours = numberValue(hotspot.properties.hours_old) ?? 48;
+          context.beginPath(); context.arc(x, y, hours <= 6 ? 3.5 : 3, 0, Math.PI * 2);
+          context.fillStyle = hours <= 6 ? "#ff3028" : "rgba(255,74,62,.28)"; context.fill();
+          context.strokeStyle = "#ff3f32"; context.lineWidth = 1.25; context.stroke();
+        }
+      }
       for (const fire of data.fires.features) {
         if (fire.geometry?.type !== "Point") continue;
         const [x, y] = project(fire.geometry.coordinates as Position);
@@ -782,15 +793,16 @@ function OverviewFallbackMap({ data, coverage, perimetersOn, evacuationsOn }: {
       }
     });
     return () => { cancelled = true; };
-  }, [data, coverage, perimetersOn, evacuationsOn]);
+  }, [data, coverage, perimetersOn, evacuationsOn, hotspotsOn]);
   return <canvas ref={canvasRef} className="fallback-map" aria-hidden="true" />;
 }
 
-function InteractiveShapeOverlay({ map, data, perimetersOn, evacuationsOn }: {
+function InteractiveShapeOverlay({ map, data, perimetersOn, evacuationsOn, hotspotsOn }: {
   map: Map | null;
   data: DashboardData | null;
   perimetersOn: boolean;
   evacuationsOn: boolean;
+  hotspotsOn: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -866,6 +878,23 @@ function InteractiveShapeOverlay({ map, data, perimetersOn, evacuationsOn }: {
           }
         }
       }
+
+      if (hotspotsOn) {
+        for (const hotspot of data.hotspots.features) {
+          if (hotspot.geometry?.type !== "Point") continue;
+          const projected = map.project(hotspot.geometry.coordinates as Position);
+          const hours = numberValue(hotspot.properties.hours_old) ?? 48;
+          const frp = numberValue(hotspot.properties.frp) ?? 0;
+          const radius = Math.min(5, (hours <= 6 ? 3.2 : 2.7) + Math.log10(Math.max(frp, 1)) * 0.45);
+          context.beginPath();
+          context.arc(projected.x, projected.y, radius, 0, Math.PI * 2);
+          context.fillStyle = hours <= 6 ? "#ff281f" : hours <= 24 ? "rgba(255,52,43,.48)" : "rgba(255,82,72,.2)";
+          context.fill();
+          context.strokeStyle = hours <= 24 ? "#ff3d31" : "#ff756b";
+          context.lineWidth = 1.2;
+          context.stroke();
+        }
+      }
     };
 
     map.on("move", draw);
@@ -877,7 +906,7 @@ function InteractiveShapeOverlay({ map, data, perimetersOn, evacuationsOn }: {
       map.off("resize", draw);
       map.off("styledata", draw);
     };
-  }, [map, data, perimetersOn, evacuationsOn]);
+  }, [map, data, perimetersOn, evacuationsOn, hotspotsOn]);
 
   return <canvas ref={canvasRef} className="map-shape-overlay" aria-hidden="true" />;
 }
@@ -1366,7 +1395,7 @@ export default function FireDashboard() {
     new: { label: "NEW • 24 HOURS", value: newFires.length.toLocaleString(), accent: true },
     perimeters: { label: "LIVE PERIMETERS", value: displayData?.perimeters.features.length.toLocaleString() ?? "—" },
     evacuations: { label: "EVAC ORDERS / WARNINGS", value: `${evacuationOrders} / ${evacuationWarnings}` },
-    hotspots: { label: "VIIRS HOTSPOTS • 24H", value: displayData?.hotspots.features.length.toLocaleString() ?? "—" },
+    hotspots: { label: "SATELLITE HOTSPOTS • 48H", value: displayData?.hotspots.features.length.toLocaleString() ?? "—" },
     following: { label: "FOLLOWED FIRES", value: activeFollowedFires.length.toLocaleString() },
     acres: { label: "ACTIVE REPORTED ACRES", value: Math.round(totalTrackedAcres).toLocaleString() },
     updated: { label: "PERIMETERS UPDATED • 24H", value: perimeterUpdates24h.toLocaleString() },
@@ -1377,7 +1406,7 @@ export default function FireDashboard() {
       caPerimeters: "California perimeters",
       caWildfireIntel: "CA Wildfire Intel",
       calOesEvacuations: "CAL OES evacuations",
-      viirsHotspots: "NASA FIRMS hotspots",
+      viirsHotspots: "NOAA HMS hotspots",
     }[name] ?? name))
     : [];
   const growth = useMemo(() => {
@@ -1861,9 +1890,9 @@ export default function FireDashboard() {
         </aside>
 
         <section className="map-panel">
-          {!mapReady && <OverviewFallbackMap data={displayData} coverage={dmaFeature} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} />}
+          {!mapReady && <OverviewFallbackMap data={displayData} coverage={dmaFeature} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} hotspotsOn={hotspotsOn} />}
           <div ref={mapContainer} className="map-canvas" aria-label="Interactive wildfire map" />
-          <InteractiveShapeOverlay map={mapReady ? mapInstance : null} data={displayData} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} />
+          <InteractiveShapeOverlay map={mapReady ? mapInstance : null} data={displayData} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} hotspotsOn={hotspotsOn} />
           {mapError && <div className="map-error"><CircleAlert size={16} /> Map tiles could not load. <button onClick={() => window.location.reload()}>Retry</button></div>}
           <div className="map-tools">
             <Button variant="secondary" size="sm" onClick={clearSelection}>
@@ -1876,7 +1905,7 @@ export default function FireDashboard() {
               <ShieldAlert size={15} /> Evacuations
             </Button>
             <Button className={hotspotsOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setHotspotsOn((value) => !value)}>
-              <Satellite size={15} /> VIIRS hotspots
+              <Satellite size={15} /> Satellite hotspots
             </Button>
             <Button className={heatmapOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setHeatmapOn((value) => !value)}>
               <Thermometer size={15} /> Heat map
@@ -2095,7 +2124,7 @@ export default function FireDashboard() {
         </aside>
       </section>
       <footer>
-        California-only view. New starts: CA Wildfire Intel. Perimeters: CAL FIRE intelligence, FIRIS and NIFC. Hotspots: NASA FIRMS VIIRS. Evacuations: CAL OES. Operational data may be revised.
+        California-only view. New starts: CA Wildfire Intel. Perimeters: CAL FIRE intelligence, FIRIS and NIFC. Hotspots: NOAA HMS satellite detections. Evacuations: CAL OES. Operational data may be revised.
       </footer>
       <Toaster position="top-center" />
     </main>

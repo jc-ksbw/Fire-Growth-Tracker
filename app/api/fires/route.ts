@@ -13,8 +13,8 @@ import { PERIMETER_RETENTION_MS } from "@/lib/capture";
 
 const NIFC_INCIDENTS =
   "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query";
-const VIIRS_HOTSPOTS =
-  "https://services9.arcgis.com/RHVPKKiFTONKtxq3/arcgis/rest/services/Satellite_VIIRS_Thermal_Hotspots_and_Fire_Activity/FeatureServer/0/query";
+const NOAA_HMS_HOTSPOTS =
+  "https://services2.arcgis.com/C8EMgrsFcRFL6LrL/arcgis/rest/services/NOAA_Satellite_Fire_Detections_(v1)/FeatureServer/0/query";
 const CA_NEW_STARTS =
   "https://services.arcgis.com/BLN4oKB0N1YSgvY8/arcgis/rest/services/WFTIIC_IA_INCIDENTS_V1_PublicView_2/FeatureServer/0/query";
 const CAL_OES_EVACUATIONS =
@@ -36,20 +36,79 @@ const emptyCollection = (): FeatureCollection => ({ type: "FeatureCollection", f
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
 
-function hotspotQueryUrl(fields: string) {
+function yearDayCode(date: Date) {
+  const year = date.getUTCFullYear();
+  const start = Date.UTC(year, 0, 1);
+  const day = Math.floor((Date.UTC(year, date.getUTCMonth(), date.getUTCDate()) - start) / 86_400_000) + 1;
+  return year * 1000 + day;
+}
+
+function hmsQueryUrl(where: string, options: { countOnly?: boolean; offset?: number } = {}) {
   const params = new URLSearchParams({
-    where: "hours_old <= 24",
+    where,
     geometry: "-124.48,32.5,-114.13,42.1",
     geometryType: "esriGeometryEnvelope",
     inSR: "4326",
     spatialRel: "esriSpatialRelIntersects",
-    outFields: fields,
-    returnGeometry: "true",
-    outSR: "4326",
-    f: "geojson",
-    resultRecordCount: "2000",
   });
-  return `${VIIRS_HOTSPOTS}?${params.toString()}`;
+  if (options.countOnly) {
+    params.set("returnCountOnly", "true");
+    params.set("f", "json");
+  } else {
+    params.set("outFields", "FID,Lon,Lat,YearDay,Time,Satellite,Method,Ecosystem,FRP");
+    params.set("returnGeometry", "true");
+    params.set("outSR", "4326");
+    params.set("orderByFields", "FID ASC");
+    params.set("resultOffset", String(options.offset ?? 0));
+    params.set("resultRecordCount", "2000");
+    params.set("f", "geojson");
+  }
+  return `${NOAA_HMS_HOTSPOTS}?${params.toString()}`;
+}
+
+function hmsObservedAt(yearDayValue: unknown, timeValue: unknown) {
+  const yearDay = number(yearDayValue);
+  if (yearDay === null) return null;
+  const year = Math.floor(yearDay / 1000);
+  const day = yearDay % 1000;
+  const digits = (text(timeValue) ?? "0000").padStart(4, "0");
+  const hour = Number(digits.slice(0, 2));
+  const minute = Number(digits.slice(2, 4));
+  const value = Date.UTC(year, 0, day, Number.isFinite(hour) ? hour : 0, Number.isFinite(minute) ? minute : 0);
+  return Number.isFinite(value) ? value : null;
+}
+
+async function getNoaaHmsHotspots() {
+  const now = new Date();
+  const dayCodes = [0, 1, 2].map((daysAgo) => yearDayCode(new Date(now.getTime() - daysAgo * 86_400_000)));
+  const where = `YearDay IN (${dayCodes.join(",")})`;
+  const countResponse = await fetch(hmsQueryUrl(where, { countOnly: true }), { headers: { Accept: "application/json" } });
+  if (!countResponse.ok) throw new Error(`NOAA HMS hotspots returned ${countResponse.status}`);
+  const countPayload = await countResponse.json() as { count?: number; error?: { message?: string } };
+  if (countPayload.error) throw new Error(countPayload.error.message ?? "NOAA HMS hotspots failed");
+  const count = Math.max(0, countPayload.count ?? 0);
+  const pageCount = Math.min(Math.ceil(count / 2000), 5);
+  const pages = await Promise.all(
+    Array.from({ length: pageCount }, (_, page) =>
+      getGeoJson(hmsQueryUrl(where, { offset: page * 2000 }), `NOAA HMS hotspots page ${page + 1}`)),
+  );
+  const fetchedAt = Date.now();
+  const features = pages.flatMap((page) => page.features).map((feature) => {
+    const observedAt = hmsObservedAt(feature.properties.YearDay, feature.properties.Time);
+    return {
+      ...feature,
+      properties: {
+        ...feature.properties,
+        observedAt,
+        hours_old: observedAt === null ? 48 : Math.max(0, (fetchedAt - observedAt) / 3_600_000),
+        frp: number(feature.properties.FRP) ?? 0,
+        satellite: text(feature.properties.Satellite),
+        method: text(feature.properties.Method),
+        hotspotSource: "NOAA HMS",
+      },
+    } satisfies Feature;
+  });
+  return { type: "FeatureCollection", features } satisfies FeatureCollection;
 }
 
 function point(feature: Feature): [number, number] | null {
@@ -276,10 +335,6 @@ export async function GET() {
     "PercentContained", "POOState", "POOCounty", "POOCity", "IrwinID",
     "UniqueFireIdentifier", "ModifiedOnDateTime_dt", "IncidentTypeCategory", "FireCause",
   ].join(",");
-  const hotspotFields = [
-    "OBJECTID", "latitude", "longitude", "bright_ti4", "satellite", "confidence",
-    "frp", "daynight", "esritimeutc", "hours_old",
-  ].join(",");
   const cwiFields = [
     "IrwinID", "IncidentName", "InitialLatitude", "InitialLongitude", "County", "Agency",
     "FireIdentifier", "IncidentSize", "CreatedOnDateTime", "DataSource", "IncidentNumber",
@@ -295,7 +350,7 @@ export async function GET() {
     getGeoJson(queryUrl(CA_PERIMETERS, PERIMETER_FIELDS, "displayStatus='Active'", true), "California fire perimeters"),
     getGeoJson(queryUrl(CA_NEW_STARTS, cwiFields, "1=1"), "CA Wildfire Intel"),
     getGeoJson(queryUrl(CAL_OES_EVACUATIONS, evacuationFields, "STATUS IS NOT NULL AND STATUS <> 'Normal'", true), "CAL OES evacuations"),
-    getGeoJson(hotspotQueryUrl(hotspotFields), "NASA FIRMS VIIRS hotspots"),
+    getNoaaHmsHotspots(),
   ]);
 
   const value = (index: number) => {
@@ -355,7 +410,7 @@ export async function GET() {
         newStarts: "California Wildfire Intel (IRWIN, PulsePoint, NOAA and CHP)",
         perimeters: "CAL FIRE California Perimeters (CAL FIRE intelligence, FIRIS and NIFC)",
         evacuations: "CAL OES California Active Evacuation Zones",
-        hotspots: "NASA FIRMS VIIRS thermal hotspots via Esri Living Atlas",
+        hotspots: "NOAA Hazard Mapping System satellite fire detections",
         satellite: "NASA GIBS GOES ABI Fire Temperature",
       },
     },
