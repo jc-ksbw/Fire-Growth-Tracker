@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { HISTORICAL_PERIMETER_SEED_GZIP } from "./perimeter-seed";
 
 type GeoJsonGeometry = { type: "Polygon" | "MultiPolygon"; coordinates: unknown };
 type PerimeterFeature = {
@@ -16,6 +17,58 @@ const textValue = (value: unknown) =>
   typeof value === "string" && value.trim() ? value.trim() : null;
 const numberValue = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
+
+type HistoricalSeedRow = {
+  versionKey: string;
+  capturedAt: number;
+  incidentName: string;
+  irwinId: string;
+  uniqueFireId: string | null;
+  perimeterDate: number | null;
+  acres: number | null;
+  contained: number | null;
+  state: string | null;
+  county: string | null;
+  geometryJson: string;
+};
+
+async function historicalSeedRows() {
+  const compressed = Uint8Array.from(atob(HISTORICAL_PERIMETER_SEED_GZIP), (character) => character.charCodeAt(0));
+  const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return JSON.parse(await new Response(stream).text()) as HistoricalSeedRow[];
+}
+
+/**
+ * Backfills the user-supplied August 2026 WFIGS snapshots once. INSERT OR
+ * IGNORE preserves any same-day perimeter that the live capture already saved.
+ */
+export async function seedHistoricalPerimeters() {
+  const db = getBinding();
+  const status = await db.prepare(
+    `SELECT COUNT(*) AS seeded
+     FROM perimeter_snapshots
+     WHERE version_key IN ('daily-2026-08-21', 'daily-2026-08-24', 'daily-2026-08-27', 'daily-2026-08-29')
+       AND lower(replace(replace(irwin_id, '{', ''), '}', '')) IN
+           ('51374d2c-d96b-40f7-940b-6cb8e0a483a2', 'c257fba6-f90e-431f-9464-067e8fbf79d7')`,
+  ).all<{ seeded: number }>();
+  if ((status.results?.[0]?.seeded ?? 0) >= 6) return 0;
+
+  const rows = await historicalSeedRows();
+  const statements = rows.map((row) => db.prepare(
+    `INSERT OR IGNORE INTO perimeter_snapshots
+     (irwin_id, unique_fire_id, incident_name, version_key, captured_at,
+      perimeter_date, acres, contained, state, county, geometry_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    row.irwinId, row.uniqueFireId, row.incidentName, row.versionKey,
+    row.capturedAt, row.perimeterDate, row.acres, row.contained,
+    row.state, row.county, row.geometryJson,
+  ));
+  for (let i = 0; i < statements.length; i += 2) {
+    await db.batch(statements.slice(i, i + 2));
+  }
+  return rows.length;
+}
 
 export async function savePerimeterSnapshots(features: PerimeterFeature[]) {
   const db = getBinding();
@@ -154,16 +207,17 @@ export async function getDailyPerimeters(date: string) {
 }
 
 export async function getPerimeterHistory(irwinId: string) {
+  const normalizedIrwinId = irwinId.replace(/[{}]/g, "").toLowerCase();
   const result = await getBinding()
     .prepare(
       `SELECT incident_name, captured_at, perimeter_date, acres, contained,
               state, county, geometry_json
        FROM perimeter_snapshots
-       WHERE irwin_id = ?
+       WHERE lower(replace(replace(irwin_id, '{', ''), '}', '')) = ?
        ORDER BY COALESCE(perimeter_date, captured_at) ASC
        LIMIT 80`,
     )
-    .bind(irwinId)
+    .bind(normalizedIrwinId)
     .all<{
       incident_name: string;
       captured_at: number;

@@ -6,7 +6,7 @@ import {
   getGeoJson,
   queryUrl,
 } from "./fire-feeds";
-import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots } from "./perimeter-store";
+import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots, seedHistoricalPerimeters } from "./perimeter-store";
 
 /** Today's archive plus the previous 19 UTC days are retained. */
 export const PERIMETER_RETENTION_MS = 20 * 86_400_000;
@@ -25,6 +25,7 @@ export async function runCapture() {
     queryUrl(CA_PERIMETERS, PERIMETER_FIELDS, "displayStatus='Active'", true),
     "California fire perimeters",
   );
+  const historicalSnapshotsSeeded = await seedHistoricalPerimeters();
   const perimeters = dedupePerimeters(raw);
   const snapshotsSaved = await savePerimeterSnapshots(
     perimeters.features as Parameters<typeof savePerimeterSnapshots>[0],
@@ -38,6 +39,7 @@ export async function runCapture() {
     capturedAt: startedAt,
     activePerimeters: perimeters.features.length,
     snapshotsSaved,
+    historicalSnapshotsSeeded,
     activeMarked,
     activityRowsDeleted: purge.activityRowsDeleted,
     snapshotsDeleted: purge.snapshotsDeleted,

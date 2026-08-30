@@ -8,7 +8,7 @@ import {
   normalizedName,
   queryUrl,
 } from "@/lib/fire-feeds";
-import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots } from "@/lib/perimeter-store";
+import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots, seedHistoricalPerimeters } from "@/lib/perimeter-store";
 import { PERIMETER_RETENTION_MS } from "@/lib/capture";
 
 const NIFC_INCIDENTS =
@@ -371,8 +371,10 @@ export async function GET() {
   const fires = dedupeFires(nifc, cwi);
 
   let snapshotsSaved = 0;
+  let historicalSnapshotsSeeded = 0;
   let historyAvailable = true;
   try {
+    historicalSnapshotsSeeded = await seedHistoricalPerimeters();
     snapshotsSaved = await savePerimeterSnapshots(perimeters.features as Parameters<typeof savePerimeterSnapshots>[0]);
     const active = perimeters.features
       .map((feature) => activeFireIdentity(feature as Parameters<typeof activeFireIdentity>[0]))
@@ -399,6 +401,7 @@ export async function GET() {
       hotspots,
       fetchedAt: Date.now(),
       historyAvailable,
+      historicalSnapshotsSeeded,
       snapshotsSaved,
       feedStatus,
       sources: {

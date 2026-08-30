@@ -10,7 +10,7 @@
     "build": "vinext build",
     "deploy": "vinext deploy",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/cloudflare-config.test.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply fire-growth-tracker-db --local",
