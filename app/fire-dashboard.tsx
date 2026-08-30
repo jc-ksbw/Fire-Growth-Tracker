@@ -431,7 +431,7 @@ async function drawBaseMap(
     for (let y = firstY; y <= lastY; y += 1) {
       tiles.push((async () => {
         try {
-          const response = await fetch(`/api/map-tile?z=${zoom}&x=${x}&y=${y}`);
+          const response = await fetch(`/api/map-tile?z=${zoom}&x=${x}&y=${y}&v=3`);
           if (!response.ok) return;
           const image = await createImageBitmap(await response.blob());
           context.drawImage(image, plot.left + x * 256 - worldWest, plot.top + y * 256 - worldNorth, 256, 256);
@@ -786,6 +786,102 @@ function OverviewFallbackMap({ data, coverage, perimetersOn, evacuationsOn }: {
   return <canvas ref={canvasRef} className="fallback-map" aria-hidden="true" />;
 }
 
+function InteractiveShapeOverlay({ map, data, perimetersOn, evacuationsOn }: {
+  map: Map | null;
+  data: DashboardData | null;
+  perimetersOn: boolean;
+  evacuationsOn: boolean;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (!map || !data) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const drawGeometry = (
+      context: CanvasRenderingContext2D,
+      geometry: Geometry,
+      fill: string,
+      stroke: string,
+      lineWidth: number,
+    ) => {
+      if (geometry.type === "Point") return;
+      const polygons = geometry.type === "Polygon"
+        ? [geometry.coordinates as Position[][]]
+        : geometry.coordinates as Position[][][];
+      for (const polygon of polygons) {
+        context.beginPath();
+        for (const ring of polygon) {
+          ring.forEach((position, index) => {
+            const projected = map.project(position);
+            if (index === 0) context.moveTo(projected.x, projected.y);
+            else context.lineTo(projected.x, projected.y);
+          });
+          context.closePath();
+        }
+        context.fillStyle = fill;
+        context.fill("evenodd");
+        context.strokeStyle = stroke;
+        context.lineWidth = lineWidth;
+        context.lineJoin = "round";
+        context.stroke();
+      }
+    };
+
+    const draw = () => {
+      const width = map.getContainer().clientWidth;
+      const height = map.getContainer().clientHeight;
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      const targetWidth = Math.round(width * pixelRatio);
+      const targetHeight = Math.round(height * pixelRatio);
+      if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+      }
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, width, height);
+
+      if (evacuationsOn) {
+        const colors: Record<string, [string, string]> = {
+          order: ["rgba(226,63,50,.24)", "#ff4f3d"],
+          warning: ["rgba(244,197,66,.22)", "#ffe05f"],
+          shelter: ["rgba(165,109,226,.23)", "#c493ff"],
+          advisory: ["rgba(238,139,58,.2)", "#ffad64"],
+        };
+        for (const zone of data.evacuations.features) {
+          if (!zone.geometry) continue;
+          const classification = textValue(zone.properties.evacuationClass) ?? "other";
+          const [fill, stroke] = colors[classification] ?? ["rgba(138,164,177,.18)", "#9db7c2"];
+          drawGeometry(context, zone.geometry, fill, stroke, 2.5);
+        }
+      }
+
+      if (perimetersOn) {
+        for (const perimeter of data.perimeters.features) {
+          if (perimeter.geometry) {
+            drawGeometry(context, perimeter.geometry, "rgba(239,67,43,.3)", "#ff6c3d", 3.5);
+          }
+        }
+      }
+    };
+
+    map.on("move", draw);
+    map.on("resize", draw);
+    map.on("styledata", draw);
+    draw();
+    return () => {
+      map.off("move", draw);
+      map.off("resize", draw);
+      map.off("styledata", draw);
+    };
+  }, [map, data, perimetersOn, evacuationsOn]);
+
+  return <canvas ref={canvasRef} className="map-shape-overlay" aria-hidden="true" />;
+}
+
 export default function FireDashboard() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
@@ -817,6 +913,7 @@ export default function FireDashboard() {
   const [camerasLoading, setCamerasLoading] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const [mapReady, setMapReady] = useState(false);
+  const [mapInstance, setMapInstance] = useState<Map | null>(null);
   const deepLinkAppliedRef = useRef(false);
   const seenFiresRef = useRef<Record<string, number> | null>(null);
   const feedStatusRef = useRef<Record<string, boolean> | null>(null);
@@ -908,7 +1005,7 @@ export default function FireDashboard() {
         sources: {
           "esri-streets": {
             type: "raster",
-            tiles: ["/api/map-tile?z={z}&x={x}&y={y}"],
+            tiles: ["/api/map-tile?z={z}&x={x}&y={y}&v=3"],
             tileSize: 256,
             attribution: "© OpenStreetMap contributors © CARTO",
           },
@@ -1080,6 +1177,7 @@ export default function FireDashboard() {
       setMapReady(true);
     });
     mapRef.current = map;
+    setMapInstance(map);
     return () => {
       cancelAnimationFrame(pulseFrame);
       fireMarkersRef.current.forEach((marker) => marker.remove());
@@ -1126,7 +1224,7 @@ export default function FireDashboard() {
     const [longitude, latitude] = selected.geometry.coordinates as Position;
     if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return;
     map.easeTo({ center: [longitude, latitude], zoom: Math.max(map.getZoom(), 9), duration: 700 });
-  }, [selected]);
+  }, [selected, mapReady]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1765,6 +1863,7 @@ export default function FireDashboard() {
         <section className="map-panel">
           {!mapReady && <OverviewFallbackMap data={displayData} coverage={dmaFeature} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} />}
           <div ref={mapContainer} className="map-canvas" aria-label="Interactive wildfire map" />
+          <InteractiveShapeOverlay map={mapReady ? mapInstance : null} data={displayData} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} />
           {mapError && <div className="map-error"><CircleAlert size={16} /> Map tiles could not load. <button onClick={() => window.location.reload()}>Retry</button></div>}
           <div className="map-tools">
             <Button variant="secondary" size="sm" onClick={clearSelection}>

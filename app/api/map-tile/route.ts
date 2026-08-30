@@ -19,6 +19,7 @@ export async function GET(request: Request) {
     headers: {
       "Content-Type": tile.headers.get("content-type") ?? "image/png",
       "Cache-Control": "public, max-age=86400, s-maxage=604800",
+      "X-Carto-Key-Configured": cartoApiKey ? "yes" : "no",
     },
   });
 }
