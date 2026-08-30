@@ -10,6 +10,7 @@ import {
   BellOff,
   BellRing,
   Check,
+  ChevronRight,
   CircleAlert,
   Clock,
   Copy,
@@ -21,8 +22,10 @@ import {
   Link2,
   LoaderCircle,
   MapPin,
+  Pause,
   Play,
   RefreshCw,
+  Route,
   Satellite,
   Settings,
   ShieldAlert,
@@ -68,11 +71,25 @@ type Snapshot = {
   county: string | null;
   geometry: Geometry;
 };
+type EvacuationEvent = {
+  zoneId: string;
+  status: string;
+  statusClass: string;
+  changedAt: number;
+  capturedAt: number;
+  county: string | null;
+  city: string | null;
+  zoneName: string | null;
+  eventType: string | null;
+  geometry: Geometry;
+};
+type TimelineLayers = { hotspots: FeatureCollection; evacuationEvents: EvacuationEvent[] };
 type DmaPreference = { id: string; name: string; state: string; abbreviation: string };
 type DmaFeature = { type: "Feature"; geometry: Geometry; properties: Record<string, unknown> };
 type AlertPreferences = {
   coverageNewFires: boolean;
   evacuationChanges: boolean;
+  newPerimeters: boolean;
   growthThresholdAcres: number;
   containmentThresholdPoints: number;
 };
@@ -81,6 +98,7 @@ type FollowedFire = {
   name: string;
   acres: number | null;
   contained: number | null;
+  perimeterDate?: number | null;
   evacuationHash: string;
   updatedAt: number;
 };
@@ -129,6 +147,7 @@ const DEFAULT_METRICS: MetricId[] = ["tracked", "new", "perimeters", "evacuation
 const DEFAULT_ALERTS: AlertPreferences = {
   coverageNewFires: true,
   evacuationChanges: true,
+  newPerimeters: true,
   growthThresholdAcres: 100,
   containmentThresholdPoints: 10,
 };
@@ -405,6 +424,44 @@ function evacuationLabel(feature: Feature) {
     ?? "Evacuation zone";
 }
 
+function timelineLayersForFrame(snapshot: Snapshot, timeline: TimelineLayers) {
+  const frameTime = snapshot.capturedAt;
+  const latestZones = new globalThis.Map<string, EvacuationEvent>();
+  for (const event of [...timeline.evacuationEvents].sort((a, b) => a.changedAt - b.changedAt || a.capturedAt - b.capturedAt)) {
+    if (event.changedAt <= frameTime) latestZones.set(event.zoneId, event);
+  }
+  const evacuations: FeatureCollection = {
+    type: "FeatureCollection",
+    features: [...latestZones.values()]
+      .filter((event) => event.statusClass !== "cleared")
+      .map((event) => ({
+        type: "Feature",
+        geometry: event.geometry,
+        properties: {
+          ZONE_ID: event.zoneId, ZONE_NAME: event.zoneName, STATUS: event.status,
+          COUNTY: event.county, CITY: event.city, EVENT_TYPE: event.eventType,
+          EDIT_DATE: event.changedAt, evacuationClass: event.statusClass,
+        },
+      })),
+  };
+  const hotspots: FeatureCollection = {
+    type: "FeatureCollection",
+    features: timeline.hotspots.features
+      .filter((feature) => {
+        const observed = numberValue(feature.properties.observedAt);
+        return observed !== null && observed <= frameTime && observed > frameTime - 24 * 3_600_000;
+      })
+      .map((feature) => ({
+        ...feature,
+        properties: {
+          ...feature.properties,
+          hours_old: Math.max(0, (frameTime - (numberValue(feature.properties.observedAt) ?? frameTime)) / 3_600_000),
+        },
+      })),
+  };
+  return { evacuations, hotspots };
+}
+
 function worldPixel([longitude, latitude]: Position, zoom: number): Position {
   const scale = 256 * 2 ** zoom;
   const clamped = Math.max(-85.0511, Math.min(85.0511, latitude));
@@ -443,7 +500,7 @@ async function drawBaseMap(
   await Promise.all(tiles);
 }
 
-async function frameCanvas(snapshots: Snapshot[], activeIndex: number) {
+async function frameCanvas(snapshots: Snapshot[], activeIndex: number, timeline: TimelineLayers = { hotspots: EMPTY, evacuationEvents: [] }) {
   const canvas = document.createElement("canvas");
   canvas.width = 1280;
   canvas.height = 720;
@@ -512,11 +569,34 @@ async function frameCanvas(snapshots: Snapshot[], activeIndex: number) {
     }
   };
 
+  const active = snapshots[activeIndex];
+  const frameLayers = timelineLayersForFrame(active, timeline);
+  for (const zone of frameLayers.evacuations.features) {
+    if (!zone.geometry) continue;
+    const colors: Record<string, [string, string]> = {
+      order: ["rgba(226,63,50,.28)", "#ff4f3d"],
+      warning: ["rgba(244,197,66,.25)", "#ffe05f"],
+      shelter: ["rgba(165,109,226,.25)", "#c493ff"],
+      advisory: ["rgba(238,139,58,.22)", "#ffad64"],
+    };
+    const [fill, stroke] = colors[textValue(zone.properties.evacuationClass) ?? ""] ?? ["rgba(138,164,177,.18)", "#9db7c2"];
+    draw(zone.geometry, fill, stroke, 2.2);
+  }
   for (let index = 0; index < activeIndex; index += 1) {
     draw(snapshots[index].geometry, "rgba(247,136,47,.04)", "rgba(247,136,47,.35)", 2);
   }
-  const active = snapshots[activeIndex];
   draw(active.geometry, "rgba(239,67,43,.55)", "#ffb15c", 3.5);
+  for (const hotspot of frameLayers.hotspots.features) {
+    if (hotspot.geometry?.type !== "Point") continue;
+    const [x, y] = project(hotspot.geometry.coordinates as Position);
+    context.beginPath();
+    context.arc(x, y, 3.2, 0, Math.PI * 2);
+    context.fillStyle = "rgba(255,48,40,.7)";
+    context.fill();
+    context.strokeStyle = "#ff3028";
+    context.lineWidth = 1.2;
+    context.stroke();
+  }
 
   // Header bug
   context.fillStyle = "#ffb15c";
@@ -524,7 +604,7 @@ async function frameCanvas(snapshots: Snapshot[], activeIndex: number) {
   context.fillText("FIRE GROWTH TRACKER", 84, 46);
   context.fillStyle = "#8d9691";
   context.font = "700 13px Arial";
-  context.fillText("PERIMETER GROWTH \u2022 CAL FIRE / FIRIS / NIFC", 84, 68);
+  context.fillText("PERIMETER • HOTSPOTS • EVACUATIONS", 84, 68);
   context.textAlign = "right";
   context.fillText(`FRAME ${activeIndex + 1} OF ${snapshots.length}`, 1196, 46);
   context.textAlign = "left";
@@ -630,12 +710,12 @@ function canvasBlob(canvas: HTMLCanvasElement) {
   return new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Image export failed")), "image/png"));
 }
 
-async function growthGifBlob(frames: Snapshot[]) {
+async function growthGifBlob(frames: Snapshot[], timeline: TimelineLayers = { hotspots: EMPTY, evacuationEvents: [] }) {
   const { GIFEncoder, quantize, applyPalette } = await import("gifenc");
   const gif = GIFEncoder();
   let palette: number[][] | undefined;
   for (let index = 0; index < frames.length; index += 1) {
-    const canvas = await frameCanvas(frames, index);
+    const canvas = await frameCanvas(frames, index, timeline);
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context) continue;
     const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
@@ -681,12 +761,12 @@ function AcresSparkline({ snapshots }: { snapshots: Snapshot[] }) {
   );
 }
 
-function GrowthMapPreview({ snapshots, activeIndex }: { snapshots: Snapshot[]; activeIndex: number }) {
+function GrowthMapPreview({ snapshots, activeIndex, timeline }: { snapshots: Snapshot[]; activeIndex: number; timeline: TimelineLayers }) {
   const previewRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     let cancelled = false;
     if (!snapshots.length) return;
-    void frameCanvas(snapshots, Math.min(activeIndex, snapshots.length - 1)).then((rendered) => {
+    void frameCanvas(snapshots, Math.min(activeIndex, snapshots.length - 1), timeline).then((rendered) => {
       const preview = previewRef.current;
       if (!preview || cancelled) return;
       preview.width = rendered.width;
@@ -694,7 +774,7 @@ function GrowthMapPreview({ snapshots, activeIndex }: { snapshots: Snapshot[]; a
       preview.getContext("2d")?.drawImage(rendered, 0, 0);
     });
     return () => { cancelled = true; };
-  }, [snapshots, activeIndex]);
+  }, [snapshots, activeIndex, timeline]);
   return <canvas ref={previewRef} className="growth-map-preview" aria-label="Fire perimeter map preview" />;
 }
 
@@ -917,20 +997,29 @@ export default function FireDashboard() {
   const fireMarkersRef = useRef<Marker[]>([]);
   const visibleFiresRef = useRef<Feature[]>([]);
   const visibleEvacuationsRef = useRef<Feature[]>([]);
+  const visibleClosuresRef = useRef<Feature[]>([]);
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Feature | null>(null);
   const [selectedEvacuation, setSelectedEvacuation] = useState<Feature | null>(null);
+  const [selectedClosure, setSelectedClosure] = useState<Feature | null>(null);
   const [hotspotsOn, setHotspotsOn] = useState(true);
   const [history, setHistory] = useState<Snapshot[]>([]);
   const [historyIndex, setHistoryIndex] = useState(0);
+  const [timelineHotspots, setTimelineHotspots] = useState<FeatureCollection>(EMPTY);
+  const [evacuationHistory, setEvacuationHistory] = useState<EvacuationEvent[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+  const [playbackActive, setPlaybackActive] = useState(false);
+  const [playing, setPlaying] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [dmaPreference, setDmaPreference] = useState<DmaPreference | null>(null);
   const [dmaFeature, setDmaFeature] = useState<DmaFeature | null>(null);
   const [heatmapOn, setHeatmapOn] = useState(false);
   const [perimetersOn, setPerimetersOn] = useState(true);
   const [evacuationsOn, setEvacuationsOn] = useState(true);
+  const [closuresOn, setClosuresOn] = useState(true);
+  const [roadClosures, setRoadClosures] = useState<FeatureCollection>(EMPTY);
   const [conditions, setConditions] = useState<FireConditions | null>(null);
   const [alertPreferences, setAlertPreferences] = useState<AlertPreferences>(DEFAULT_ALERTS);
   const [followedFires, setFollowedFires] = useState<FollowedFire[]>([]);
@@ -979,10 +1068,57 @@ export default function FireDashboard() {
     };
   }, [data, dmaFeature]);
 
+  const displayRoadClosures = useMemo(() => {
+    if (!dmaFeature) return roadClosures;
+    return {
+      type: "FeatureCollection",
+      features: roadClosures.features.filter((closure) =>
+        closure.geometry?.type === "Point" && pointInGeometry(closure.geometry.coordinates as Position, dmaFeature.geometry)),
+    } satisfies FeatureCollection;
+  }, [roadClosures, dmaFeature]);
+
+  const timelineLayers = useMemo<TimelineLayers>(() => ({
+    hotspots: timelineHotspots,
+    evacuationEvents: evacuationHistory,
+  }), [timelineHotspots, evacuationHistory]);
+  const playbackSnapshot = playbackActive ? history[Math.min(historyIndex, history.length - 1)] ?? null : null;
+  const playbackCollections = useMemo(() => {
+    if (!playbackSnapshot) return null;
+    const layers = timelineLayersForFrame(playbackSnapshot, timelineLayers);
+    const id = featureId(selected);
+    const perimeter: FeatureCollection = {
+      type: "FeatureCollection",
+      features: [{
+        type: "Feature",
+        geometry: playbackSnapshot.geometry,
+        properties: {
+          poly_IRWINID: id,
+          attr_IrwinID: id,
+          poly_IncidentName: playbackSnapshot.incidentName,
+          attr_IncidentName: playbackSnapshot.incidentName,
+          poly_Acres_AutoCalc: playbackSnapshot.acres,
+          poly_PolygonDateTime: playbackSnapshot.perimeterDate,
+          perimeterSource: "Saved daily perimeter",
+        },
+      }],
+    };
+    return { ...layers, perimeter };
+  }, [playbackSnapshot, timelineLayers, selected]);
+  const mapDisplayData = useMemo(() => {
+    if (!displayData || !playbackCollections) return displayData;
+    return {
+      ...displayData,
+      perimeters: playbackCollections.perimeter,
+      evacuations: playbackCollections.evacuations,
+      hotspots: playbackCollections.hotspots,
+    };
+  }, [displayData, playbackCollections]);
+
   useEffect(() => {
-    visibleFiresRef.current = displayData?.fires.features ?? [];
-    visibleEvacuationsRef.current = displayData?.evacuations.features ?? [];
-  }, [displayData]);
+    visibleFiresRef.current = mapDisplayData?.fires.features ?? [];
+    visibleEvacuationsRef.current = mapDisplayData?.evacuations.features ?? [];
+    visibleClosuresRef.current = displayRoadClosures.features;
+  }, [mapDisplayData, displayRoadClosures]);
 
   const loadData = async () => {
     try {
@@ -998,9 +1134,21 @@ export default function FireDashboard() {
     }
   };
 
+  const loadRoadClosures = async () => {
+    try {
+      const response = await fetch("/api/road-closures", { cache: "no-store" });
+      const payload = await response.json() as FeatureCollection & { error?: string };
+      if (!response.ok || payload.error) throw new Error(payload.error ?? "Caltrans closures unavailable");
+      setRoadClosures(payload);
+    } catch {
+      setRoadClosures(EMPTY);
+    }
+  };
+
   useEffect(() => {
     void loadData();
-    const interval = window.setInterval(() => void loadData(), 300_000);
+    void loadRoadClosures();
+    const interval = window.setInterval(() => { void loadData(); void loadRoadClosures(); }, 300_000);
     return () => window.clearInterval(interval);
   }, []);
 
@@ -1132,6 +1280,19 @@ export default function FireDashboard() {
         source: "coverage-area",
         paint: { "line-color": "#ffd166", "line-width": 2, "line-opacity": 0.85 },
       });
+      map.addSource("road-closures", { type: "geojson", data: EMPTY as never });
+      map.addLayer({
+        id: "road-closures-points",
+        type: "circle",
+        source: "road-closures",
+        paint: {
+          "circle-color": ["match", ["get", "closureClass"], "pending", "#ffb84d", "seasonal", "#8f9ba0", "#191d20"],
+          "circle-radius": 6.5,
+          "circle-stroke-color": "#ff643f",
+          "circle-stroke-width": 2.5,
+          "circle-opacity": 0.96,
+        },
+      });
       map.addSource("fires", { type: "geojson", data: EMPTY as never });
       map.addLayer({
         id: "fire-points",
@@ -1169,6 +1330,7 @@ export default function FireDashboard() {
           const idMatch = comparableId(featureId(match));
           setSelected(match);
           setSelectedEvacuation(null);
+          setSelectedClosure(null);
           updateFireParam(idMatch);
         }
       };
@@ -1178,15 +1340,22 @@ export default function FireDashboard() {
         const properties = event.features?.[0]?.properties ?? {};
         const id = textValue(properties.ZONE_ID) ?? textValue(properties.GlobalID) ?? String(properties.OBJECTID ?? "");
         const match = visibleEvacuationsRef.current.find((feature) => evacuationId(feature) === id);
-        if (match) { setSelectedEvacuation(match); setSelected(null); }
+        if (match) { setSelectedEvacuation(match); setSelectedClosure(null); setSelected(null); }
+      });
+      map.on("click", "road-closures-points", (event) => {
+        const properties = event.features?.[0]?.properties ?? {};
+        const id = textValue(properties.closureId);
+        const match = visibleClosuresRef.current.find((feature) => textValue(feature.properties.closureId) === id);
+        if (match) { setSelectedClosure(match); setSelectedEvacuation(null); setSelected(null); updateFireParam(null); }
       });
       map.on("click", (event) => {
         const hits = map.queryRenderedFeatures(event.point, {
-          layers: ["fire-points", "fire-perimeters-fill", "evacuations-fill"],
+          layers: ["fire-points", "fire-perimeters-fill", "evacuations-fill", "road-closures-points"],
         });
         if (!hits.length) {
           setSelected(null);
           setSelectedEvacuation(null);
+          setSelectedClosure(null);
           updateFireParam(null);
         }
       });
@@ -1194,6 +1363,8 @@ export default function FireDashboard() {
       map.on("mouseleave", "fire-points", () => { map.getCanvas().style.cursor = ""; });
       map.on("mouseenter", "evacuations-fill", () => { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", "evacuations-fill", () => { map.getCanvas().style.cursor = ""; });
+      map.on("mouseenter", "road-closures-points", () => { map.getCanvas().style.cursor = "pointer"; });
+      map.on("mouseleave", "road-closures-points", () => { map.getCanvas().style.cursor = ""; });
       const animatePulse = (time: number) => {
         const phase = (time % 1800) / 1800;
         if (map.getLayer("fire-points-pulse")) {
@@ -1218,15 +1389,15 @@ export default function FireDashboard() {
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !displayData) return;
+    if (!map || !mapDisplayData) return;
     const sync = () => {
-      (map.getSource("fires") as GeoJSONSource | undefined)?.setData(displayData.fires as never);
-      (map.getSource("fire-perimeters") as GeoJSONSource | undefined)?.setData(displayData.perimeters as never);
-      (map.getSource("evacuations") as GeoJSONSource | undefined)?.setData(displayData.evacuations as never);
-      (map.getSource("hotspots") as GeoJSONSource | undefined)?.setData(displayData.hotspots as never);
+      (map.getSource("fires") as GeoJSONSource | undefined)?.setData(mapDisplayData.fires as never);
+      (map.getSource("fire-perimeters") as GeoJSONSource | undefined)?.setData(mapDisplayData.perimeters as never);
+      (map.getSource("evacuations") as GeoJSONSource | undefined)?.setData(mapDisplayData.evacuations as never);
+      (map.getSource("hotspots") as GeoJSONSource | undefined)?.setData(mapDisplayData.hotspots as never);
 
       fireMarkersRef.current.forEach((marker) => marker.remove());
-      fireMarkersRef.current = displayData.fires.features.flatMap((fire) => {
+      fireMarkersRef.current = mapDisplayData.fires.features.flatMap((fire) => {
         if (fire.geometry?.type !== "Point") return [];
         const [longitude, latitude] = fire.geometry.coordinates as Position;
         if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return [];
@@ -1239,13 +1410,21 @@ export default function FireDashboard() {
           event.stopPropagation();
           setSelected(fire);
           setSelectedEvacuation(null);
+          setSelectedClosure(null);
           updateFireParam(comparableId(featureId(fire)));
         });
         return [new Marker({ element, anchor: "center" }).setLngLat([longitude, latitude]).addTo(map)];
       });
     };
     if (map.getSource("fires")) sync(); else map.once("load", sync);
-  }, [displayData]);
+  }, [mapDisplayData]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const sync = () => (map.getSource("road-closures") as GeoJSONSource | undefined)?.setData(displayRoadClosures as never);
+    if (map.getSource("road-closures")) sync(); else map.once("load", sync);
+  }, [displayRoadClosures]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1257,14 +1436,21 @@ export default function FireDashboard() {
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !displayData || selected || selectedEvacuation) return;
+    if (!map || selectedClosure?.geometry?.type !== "Point") return;
+    const [longitude, latitude] = selectedClosure.geometry.coordinates as Position;
+    if (Number.isFinite(longitude) && Number.isFinite(latitude)) map.easeTo({ center: [longitude, latitude], zoom: Math.max(map.getZoom(), 10), duration: 700 });
+  }, [selectedClosure, mapReady]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !displayData || selected || selectedEvacuation || selectedClosure) return;
     const bounds = dmaFeature?.geometry
       ? geometryBounds(dmaFeature.geometry)
       : collectionsBounds([displayData.fires, displayData.perimeters, displayData.evacuations]);
     if (!bounds) return;
     const timer = window.setTimeout(() => map.fitBounds(bounds, { padding: 36, duration: 700, maxZoom: 9 }), 80);
     return () => window.clearTimeout(timer);
-  }, [displayData, dmaFeature, selected, selectedEvacuation]);
+  }, [displayData, dmaFeature, selected, selectedEvacuation, selectedClosure]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1305,19 +1491,54 @@ export default function FireDashboard() {
   }, [evacuationsOn, mapReady]);
 
   useEffect(() => {
+    const map = mapRef.current;
+    if (!map?.getLayer("road-closures-points")) return;
+    map.setLayoutProperty("road-closures-points", "visibility", closuresOn ? "visible" : "none");
+  }, [closuresOn, mapReady]);
+
+  useEffect(() => {
     const id = featureId(selected);
-    if (!id) { setHistory([]); return; }
+    if (!id) {
+      setHistory([]); setTimelineHotspots(EMPTY); setEvacuationHistory([]);
+      setPlaybackActive(false); setPlaying(false);
+      return;
+    }
     setHistory([]);
+    setTimelineHotspots(EMPTY);
+    setEvacuationHistory([]);
     setHistoryIndex(0);
-    fetch(`/api/history?irwin=${encodeURIComponent(id)}`)
+    setTimelineLoading(true);
+    setPlaybackActive(false);
+    setPlaying(false);
+    const coordinates = selected?.geometry?.type === "Point" ? selected.geometry.coordinates as Position : null;
+    const location = coordinates ? `&lat=${coordinates[1]}&lon=${coordinates[0]}` : "";
+    fetch(`/api/history?irwin=${encodeURIComponent(id)}${location}`)
       .then((response) => response.json())
-      .then((payload: { snapshots?: Snapshot[] }) => {
+      .then((payload: { snapshots?: Snapshot[]; evacuationEvents?: EvacuationEvent[]; hotspots?: FeatureCollection }) => {
         const snapshots = payload.snapshots ?? [];
         setHistory(snapshots);
+        setEvacuationHistory(payload.evacuationEvents ?? []);
+        setTimelineHotspots(payload.hotspots ?? EMPTY);
         setHistoryIndex(Math.max(0, snapshots.length - 1));
       })
-      .catch(() => setHistory([]));
+      .catch(() => { setHistory([]); setEvacuationHistory([]); setTimelineHotspots(EMPTY); })
+      .finally(() => setTimelineLoading(false));
   }, [selected]);
+
+  useEffect(() => {
+    if (!playing || history.length < 2) return;
+    setPlaybackActive(true);
+    const interval = window.setInterval(() => {
+      setHistoryIndex((current) => {
+        if (current >= history.length - 1) {
+          setPlaying(false);
+          return current;
+        }
+        return current + 1;
+      });
+    }, 1200);
+    return () => window.clearInterval(interval);
+  }, [playing, history.length]);
 
   useEffect(() => {
     if (selected?.geometry?.type !== "Point") {
@@ -1449,6 +1670,16 @@ export default function FireDashboard() {
   }] : [];
   const exportFrames = history.length ? history : currentFallback;
   const satelliteImage = satelliteStillUrl(selected);
+  const nearbyRoadClosures = useMemo(() => {
+    if (selected?.geometry?.type !== "Point") return [];
+    const origin = selected.geometry.coordinates as Position;
+    return displayRoadClosures.features
+      .filter((closure) => closure.geometry?.type === "Point")
+      .map((closure) => ({ closure, distanceMiles: distanceKm(origin, closure.geometry?.coordinates as Position) * 0.621371 }))
+      .filter((item) => item.distanceMiles <= 75)
+      .sort((a, b) => a.distanceMiles - b.distanceMiles)
+      .slice(0, 5);
+  }, [selected, displayRoadClosures]);
   const activity = useMemo(() => {
     if (!selected || !displayData) return null;
     const origin = selected.geometry?.type === "Point" ? selected.geometry.coordinates as Position : null;
@@ -1494,13 +1725,21 @@ export default function FireDashboard() {
       }
     });
     const origin = selected.geometry?.type === "Point" ? selected.geometry.coordinates as Position : null;
-    displayData.evacuations.features.forEach((zone) => {
-      if (!zone.geometry) return;
-      const touches = (origin ? pointInGeometry(origin, zone.geometry) : false)
-        || (selectedPerimeter?.geometry ? geometryIntersectsCoverage(selectedPerimeter.geometry, zone.geometry) : false);
+    const evacuationEvents = evacuationHistory.length ? evacuationHistory : displayData.evacuations.features.map((zone) => ({
+      zoneId: evacuationId(zone),
+      status: textValue(zone.properties.STATUS) ?? "Evacuation zone",
+      statusClass: textValue(zone.properties.evacuationClass) ?? "other",
+      changedAt: numberValue(zone.properties.EDIT_DATE ?? zone.properties.EditDate ?? zone.properties.STATEWIDE_LAST_UPDATED) ?? displayData.fetchedAt,
+      capturedAt: displayData.fetchedAt,
+      county: textValue(zone.properties.COUNTY), city: textValue(zone.properties.CITY),
+      zoneName: evacuationLabel(zone), eventType: textValue(zone.properties.EVENT_TYPE), geometry: zone.geometry as Geometry,
+    }));
+    evacuationEvents.forEach((event) => {
+      if (!event.geometry) return;
+      const touches = (origin ? pointInGeometry(origin, event.geometry) : false)
+        || (selectedPerimeter?.geometry ? geometryIntersectsCoverage(selectedPerimeter.geometry, event.geometry) : false);
       if (!touches) return;
-      const time = numberValue(zone.properties.EDIT_DATE ?? zone.properties.EditDate ?? zone.properties.STATEWIDE_LAST_UPDATED) ?? displayData.fetchedAt;
-      entries.push({ time, type: "evacuation", title: `${textValue(zone.properties.STATUS) ?? "Evacuation zone"}: ${evacuationLabel(zone)}`, detail: textValue(zone.properties.COUNTY) ?? "California" });
+      entries.push({ time: event.changedAt, type: "evacuation", title: `${event.status}: ${event.zoneName ?? event.zoneId}`, detail: [event.county, event.city, event.eventType].filter(Boolean).join(" • ") || "California" });
     });
     const sourceUpdated = numberValue(selected.properties.ModifiedOnDateTime_dt);
     if (sourceUpdated) entries.push({ time: sourceUpdated, type: "source", title: "Incident record updated", detail: Array.isArray(selected.properties.sources) ? (selected.properties.sources as string[]).join(" + ") : "NIFC WFIGS" });
@@ -1509,7 +1748,7 @@ export default function FireDashboard() {
       if (Number.isFinite(time)) entries.push({ time, type: "weather", title: alert.event, detail: alert.headline ?? `${alert.severity} weather alert` });
     }
     return entries.sort((a, b) => b.time - a.time).slice(0, 32);
-  }, [selected, displayData, selectedPerimeter, history, conditions]);
+  }, [selected, displayData, selectedPerimeter, history, conditions, evacuationHistory]);
   const selectedId = comparableId(featureId(selected));
   const isFollowingSelected = Boolean(selectedId && followedFires.some((fire) => comparableId(fire.id) === selectedId));
   const shareSummary = selected
@@ -1536,6 +1775,9 @@ export default function FireDashboard() {
   const clearSelection = () => {
     setSelected(null);
     setSelectedEvacuation(null);
+    setSelectedClosure(null);
+    setPlaybackActive(false);
+    setPlaying(false);
     updateFireParam(null);
     window.requestAnimationFrame(fitFullCoverage);
   };
@@ -1543,11 +1785,13 @@ export default function FireDashboard() {
   const selectFire = (fire: Feature) => {
     setSelected(fire);
     setSelectedEvacuation(null);
+    setSelectedClosure(null);
     updateFireParam(comparableId(featureId(fire)));
   };
 
   const selectEvacuation = (evacuation: Feature) => {
     setSelectedEvacuation(evacuation);
+    setSelectedClosure(null);
     setSelected(null);
     updateFireParam(null);
     if (evacuation.geometry) {
@@ -1573,6 +1817,7 @@ export default function FireDashboard() {
           ?? numberValue(perimeter?.properties.poly_Acres_AutoCalc)
           ?? numberValue(perimeter?.properties.poly_GISAcres),
         contained: numberValue(selected.properties.PercentContained),
+        perimeterDate: numberValue(perimeter?.properties.poly_PolygonDateTime ?? perimeter?.properties.poly_DateCurrent),
         evacuationHash: evacuationHashForFire(selected, perimeter, displayData),
         updatedAt: displayData.fetchedAt,
       }];
@@ -1615,8 +1860,13 @@ export default function FireDashboard() {
         ?? numberValue(perimeter?.properties.poly_Acres_AutoCalc)
         ?? numberValue(perimeter?.properties.poly_GISAcres);
       const contained = numberValue(fire.properties.PercentContained);
+      const perimeterDate = numberValue(perimeter?.properties.poly_PolygonDateTime ?? perimeter?.properties.poly_DateCurrent);
       const evacuationHash = evacuationHashForFire(fire, perimeter, displayData);
       const messages: string[] = [];
+      if (alertPreferences.newPerimeters && perimeterDate !== null && record.perimeterDate !== undefined
+        && record.perimeterDate !== null && perimeterDate > record.perimeterDate) {
+        messages.push("a new perimeter was published");
+      }
       if (acres !== null && record.acres !== null && acres - record.acres >= alertPreferences.growthThresholdAcres) {
         messages.push(`grew ${Math.round(acres - record.acres).toLocaleString()} acres`);
       }
@@ -1632,7 +1882,10 @@ export default function FireDashboard() {
         toast.warning(title, { description: body, duration: 18_000, action: { label: "View", onClick: () => selectFire(fire) } });
         browserNotify(title, body);
       }
-      const next = { ...record, name: textValue(fire.properties.IncidentName) ?? record.name, acres, contained, evacuationHash, updatedAt: displayData.fetchedAt };
+      const next = {
+        ...record, name: textValue(fire.properties.IncidentName) ?? record.name,
+        acres, contained, perimeterDate, evacuationHash, updatedAt: displayData.fetchedAt,
+      };
       if (JSON.stringify(next) !== JSON.stringify(record)) changed = true;
       return next;
     });
@@ -1716,7 +1969,7 @@ export default function FireDashboard() {
 
   const exportStill = async () => {
     if (!exportFrames.length) return;
-    const canvas = await frameCanvas(exportFrames, Math.min(historyIndex, exportFrames.length - 1));
+    const canvas = await frameCanvas(exportFrames, Math.min(historyIndex, exportFrames.length - 1), timelineLayers);
     downloadBlob(await canvasBlob(canvas), `${safeFileName(exportFrames[0].incidentName)}-growth.png`);
   };
 
@@ -1724,7 +1977,7 @@ export default function FireDashboard() {
     if (exportFrames.length < 2) return;
     setExporting(true);
     try {
-      downloadBlob(await growthGifBlob(exportFrames), `${safeFileName(exportFrames[0].incidentName)}-growth.gif`);
+      downloadBlob(await growthGifBlob(exportFrames, timelineLayers), `${safeFileName(exportFrames[0].incidentName)}-growth.gif`);
     } finally {
       setExporting(false);
     }
@@ -1736,8 +1989,8 @@ export default function FireDashboard() {
     try {
       const baseName = safeFileName(textValue(selected.properties.IncidentName) ?? "wildfire");
       const files: Array<{ name: string; blob: Blob }> = [];
-      files.push({ name: "graphics/fire-growth-16x9.png", blob: await canvasBlob(await frameCanvas(exportFrames, Math.min(historyIndex, exportFrames.length - 1))) });
-      if (exportFrames.length >= 2) files.push({ name: "graphics/fire-growth.gif", blob: await growthGifBlob(exportFrames) });
+      files.push({ name: "graphics/fire-growth-16x9.png", blob: await canvasBlob(await frameCanvas(exportFrames, Math.min(historyIndex, exportFrames.length - 1), timelineLayers)) });
+      if (exportFrames.length >= 2) files.push({ name: "graphics/fire-growth.gif", blob: await growthGifBlob(exportFrames, timelineLayers) });
 
       const origin = selected.geometry?.type === "Point" ? selected.geometry.coordinates as Position : null;
       const touchingZones = displayData.evacuations.features.filter((zone) => zone.geometry && (
@@ -1890,9 +2143,9 @@ export default function FireDashboard() {
         </aside>
 
         <section className="map-panel">
-          {!mapReady && <OverviewFallbackMap data={displayData} coverage={dmaFeature} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} hotspotsOn={hotspotsOn} />}
+          {!mapReady && <OverviewFallbackMap data={mapDisplayData} coverage={dmaFeature} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} hotspotsOn={hotspotsOn} />}
           <div ref={mapContainer} className="map-canvas" aria-label="Interactive wildfire map" />
-          <InteractiveShapeOverlay map={mapReady ? mapInstance : null} data={displayData} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} hotspotsOn={hotspotsOn} />
+          <InteractiveShapeOverlay map={mapReady ? mapInstance : null} data={mapDisplayData} perimetersOn={perimetersOn} evacuationsOn={evacuationsOn} hotspotsOn={hotspotsOn} />
           {mapError && <div className="map-error"><CircleAlert size={16} /> Map tiles could not load. <button onClick={() => window.location.reload()}>Retry</button></div>}
           <div className="map-tools">
             <Button variant="secondary" size="sm" onClick={clearSelection}>
@@ -1907,6 +2160,9 @@ export default function FireDashboard() {
             <Button className={hotspotsOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setHotspotsOn((value) => !value)}>
               <Satellite size={15} /> Satellite hotspots
             </Button>
+            <Button className={closuresOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setClosuresOn((value) => !value)}>
+              <Route size={15} /> Road closures
+            </Button>
             <Button className={heatmapOn ? "active" : ""} variant="secondary" size="sm" onClick={() => setHeatmapOn((value) => !value)}>
               <Thermometer size={15} /> Heat map
             </Button>
@@ -1918,11 +2174,35 @@ export default function FireDashboard() {
             <span><i className="legend-hotspot" /> Thermal hotspot</span>
             {heatmapOn && <span><i className="legend-heat" /> Heat intensity</span>}
             {evacuationsOn && <><span><i className="legend-evac-order" /> Evac order</span><span><i className="legend-evac-warning" /> Warning</span><span><i className="legend-shelter" /> Shelter in place</span></>}
+            {closuresOn && <span><i className="legend-road-closure" /> Road closure</span>}
           </div>
+          {playbackActive && playbackSnapshot && (
+            <div className="playback-status">
+              <span><Play size={13} /> Timeline</span>
+              <strong>{formatDate(playbackSnapshot.perimeterDate ?? playbackSnapshot.capturedAt, true)}</strong>
+              <small>{playbackCollections?.hotspots.features.length ?? 0} heat signatures • {playbackCollections?.evacuations.features.length ?? 0} evacuation zones</small>
+              <button onClick={() => { setPlaying(false); setPlaybackActive(false); setHistoryIndex(Math.max(0, exportFrames.length - 1)); }}>Live map</button>
+            </div>
+          )}
         </section>
 
         <aside className="detail-panel">
-          {selectedEvacuation ? (
+          {selectedClosure ? (
+            <>
+              <div className="detail-heading road-closure-detail">
+                <button className="detail-close" onClick={clearSelection} aria-label="Close road closure details"><X size={16} /></button>
+                <span>CALTRANS QUICKMAP • ROAD CLOSURE</span>
+                <h2>{textValue(selectedClosure.properties.title) ?? "Road closure"}</h2>
+                <p>{textValue(selectedClosure.properties.closureClass) === "pending" ? "Pending full closure" : textValue(selectedClosure.properties.closureClass) === "seasonal" ? "Seasonal closure" : "Full closure"}</p>
+              </div>
+              <section className="evacuation-info-card">
+                <div className="section-title"><Route size={15} /><span>Closure details</span></div>
+                {(Array.isArray(selectedClosure.properties.details) ? selectedClosure.properties.details as string[] : []).map((detail, index) => <p key={index}>{detail}</p>)}
+                {textValue(selectedClosure.properties.updatedLabel) && <small>{textValue(selectedClosure.properties.updatedLabel)}</small>}
+                <Button asChild variant="outline" className="quickmap-link"><a href={textValue(selectedClosure.properties.url) ?? "https://quickmap.dot.ca.gov/"} target="_blank" rel="noreferrer">Open Caltrans QuickMap <ExternalLink size={14} /></a></Button>
+              </section>
+            </>
+          ) : selectedEvacuation ? (
             <>
               <div className={`detail-heading evacuation-detail ${textValue(selectedEvacuation.properties.evacuationClass) ?? "other"}`}>
                 <span>CAL OES • ACTIVE EVACUATION ZONE</span>
@@ -1991,6 +2271,23 @@ export default function FireDashboard() {
                     ))}
                   </ol>
                 ) : <div className="image-unavailable">Nearby camera links are temporarily unavailable.</div>}
+              </section>
+
+              <section className="camera-card road-access-card">
+                <div className="section-title"><Route size={15} /><span>Nearby full road closures</span><b>{nearbyRoadClosures.length}</b></div>
+                {nearbyRoadClosures.length ? (
+                  <ol className="camera-list closure-list">
+                    {nearbyRoadClosures.map(({ closure, distanceMiles }) => (
+                      <li key={textValue(closure.properties.closureId)}>
+                        <button onClick={() => { setSelectedClosure(closure); setSelected(null); updateFireParam(null); }}>
+                          <span><strong>{textValue(closure.properties.title) ?? "Road closure"}</strong><small>{distanceMiles.toFixed(1)} miles away • {textValue(closure.properties.closureClass) ?? "full"}</small></span>
+                          <ChevronRight size={14} />
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                ) : <div className="image-unavailable compact">No Caltrans full closures within 75 miles.</div>}
+                <a className="source-link" href="https://quickmap.dot.ca.gov/" target="_blank" rel="noreferrer">Open statewide QuickMap <ExternalLink size={12} /></a>
               </section>
 
               <section className="share-card">
@@ -2094,7 +2391,19 @@ export default function FireDashboard() {
                 {exportFrames.length ? (
                   <>
                     <div className="growth-preview">
-                      <GrowthMapPreview snapshots={exportFrames} activeIndex={historyIndex} />
+                      <GrowthMapPreview snapshots={exportFrames} activeIndex={historyIndex} timeline={timelineLayers} />
+                    </div>
+                    <div className="playback-controls">
+                      <Button variant="secondary" size="sm" onClick={() => {
+                        if (playing) { setPlaying(false); return; }
+                        if (historyIndex >= exportFrames.length - 1) setHistoryIndex(0);
+                        setPlaybackActive(true);
+                        setPlaying(true);
+                      }} disabled={exportFrames.length < 2}>
+                        {playing ? <Pause size={14} /> : <Play size={14} />} {playing ? "Pause" : "Play timeline"}
+                      </Button>
+                      {playbackActive && <Button variant="ghost" size="sm" onClick={() => { setPlaying(false); setPlaybackActive(false); setHistoryIndex(Math.max(0, exportFrames.length - 1)); }}>Live map</Button>}
+                      {timelineLoading && <span><LoaderCircle className="spin" size={13} /> Loading events…</span>}
                     </div>
                     <Slider
                       aria-label="Growth frame"
@@ -2102,7 +2411,7 @@ export default function FireDashboard() {
                       max={Math.max(0, exportFrames.length - 1)}
                       step={1}
                       value={[Math.min(historyIndex, exportFrames.length - 1)]}
-                      onValueChange={(value) => setHistoryIndex(value[0] ?? 0)}
+                      onValueChange={(value) => { setHistoryIndex(value[0] ?? 0); setPlaybackActive(true); setPlaying(false); }}
                       disabled={exportFrames.length < 2}
                     />
                     {exportFrames.length < 2 && <p className="history-note">The first perimeter is saved. GIF export activates after NIFC publishes another changed shape.</p>}

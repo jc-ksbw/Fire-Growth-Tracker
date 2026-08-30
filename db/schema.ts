@@ -32,3 +32,49 @@ export const perimeterSnapshots = sqliteTable(
     index("perimeter_snapshots_fire_time_idx").on(table.irwinId, table.capturedAt),
   ],
 );
+
+export const evacuationZoneState = sqliteTable("evacuation_zone_state", {
+  zoneId: text("zone_id").primaryKey(),
+  statusFingerprint: text("status_fingerprint").notNull(),
+  status: text("status").notNull(),
+  statusClass: text("status_class").notNull(),
+  sourceUpdatedAt: integer("source_updated_at"),
+  lastSeenAt: integer("last_seen_at").notNull(),
+  active: integer("active").notNull().default(1),
+  county: text("county"),
+  city: text("city"),
+  zoneName: text("zone_name"),
+  eventType: text("event_type"),
+  geometryJson: text("geometry_json").notNull(),
+  west: real("west").notNull(),
+  south: real("south").notNull(),
+  east: real("east").notNull(),
+  north: real("north").notNull(),
+});
+
+export const evacuationEvents = sqliteTable(
+  "evacuation_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    zoneId: text("zone_id").notNull(),
+    versionKey: text("version_key").notNull(),
+    status: text("status").notNull(),
+    statusClass: text("status_class").notNull(),
+    changedAt: integer("changed_at").notNull(),
+    capturedAt: integer("captured_at").notNull(),
+    county: text("county"),
+    city: text("city"),
+    zoneName: text("zone_name"),
+    eventType: text("event_type"),
+    geometryJson: text("geometry_json").notNull(),
+    west: real("west").notNull(),
+    south: real("south").notNull(),
+    east: real("east").notNull(),
+    north: real("north").notNull(),
+  },
+  (table) => [
+    uniqueIndex("evacuation_events_zone_version_unique").on(table.zoneId, table.versionKey),
+    index("evacuation_events_time_idx").on(table.changedAt),
+    index("evacuation_events_bounds_idx").on(table.west, table.south, table.east, table.north),
+  ],
+);

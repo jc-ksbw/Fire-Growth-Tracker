@@ -192,6 +192,12 @@ button { font-family: inherit; }
 .legend-evac-order { border: 1px solid #ff5a4c; background: rgba(226,63,50,.35); }
 .legend-evac-warning { border: 1px solid #ffe07a; background: rgba(244,197,66,.32); }
 .legend-shelter { border: 1px solid #c99bff; background: rgba(165,109,226,.32); }
+.legend-road-closure { width: 10px !important; height: 10px !important; border: 2px solid #ff643f; border-radius: 50% !important; background: #191d20; }
+.playback-status { position: absolute; z-index: 5; top: 62px; left: 50%; display: flex; align-items: center; gap: 9px; max-width: calc(100% - 32px); padding: 7px 9px; border: 1px solid #735138; border-radius: 7px; background: rgba(17,23,25,.94); box-shadow: 0 6px 20px rgba(0,0,0,.3); transform: translateX(-50%); }
+.playback-status span { display: flex; align-items: center; gap: 5px; color: #ffad68; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.playback-status strong { color: #eceee8; font-size: 10px; white-space: nowrap; }
+.playback-status small { color: #8f9994; font-size: 9px; white-space: nowrap; }
+.playback-status button { border: 0; background: none; color: #ffbd79; font-size: 9px; text-decoration: underline; cursor: pointer; white-space: nowrap; }
 
 .detail-panel { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #3e484b transparent; border-left: 1px solid #2b3336; }
 .detail-empty { min-height: 460px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 36px; color: #6f7974; text-align: center; }
@@ -219,6 +225,7 @@ button { font-family: inherit; }
 .incident-source-note small { display: block; margin-top: 4px; color: #ffad68; font-size: 9px; }
 .satellite-card, .growth-card, .evacuation-info-card, .camera-card { padding: 16px; border-bottom: 1px solid #2b3336; }
 .evacuation-info-card > p { margin: 0; color: #c3c7c3; font-size: 13px; line-height: 1.65; white-space: pre-line; }
+.evacuation-info-card > p + p { margin-top: 10px; }
 .evacuation-info-card > small { display: block; margin-top: 18px; padding-top: 12px; border-top: 1px solid #2d3538; color: #7c8581; font-size: 10px; line-height: 1.55; }
 .section-title { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; color: #bdc1be; font-size: 10px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
 .section-title svg { color: #ff8a3d; }
@@ -231,10 +238,17 @@ button { font-family: inherit; }
 .camera-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .camera-list a { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border: 1px solid #30383b; border-radius: 5px; background: #111719; color: #dfe2dc; text-decoration: none; }
 .camera-list a:hover { border-color: #6d5039; color: #ffbd79; }
+.camera-list button { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border: 1px solid #30383b; border-radius: 5px; background: #111719; color: #dfe2dc; cursor: pointer; text-align: left; }
+.camera-list button:hover { border-color: #6d5039; color: #ffbd79; }
 .camera-list span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .camera-list strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .camera-list small { color: #77817c; font-size: 9px; text-transform: capitalize; }
 .history-note { margin: 10px 0 0; color: #76807b; font-size: 10px; line-height: 1.45; }
+.playback-controls { display: flex; align-items: center; gap: 7px; margin: 0 0 11px; }
+.playback-controls > span { margin-left: auto; display: flex; align-items: center; gap: 5px; color: #7f8984; font-size: 9px; }
+.quickmap-link { width: 100%; margin-top: 14px; }
+.source-link { display: flex; align-items: center; gap: 5px; margin-top: 10px; color: #ffad68; font-size: 9px; text-decoration: none; }
+.image-unavailable.compact { min-height: 54px; }
 .export-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 13px; }
 .export-actions button { font-size: 11px; }
 .spin { animation: spin 1s linear infinite; }
@@ -329,6 +343,8 @@ footer { padding: 9px 16px; border-top: 1px solid #2b3336; color: #68716d; backg
   .archive-list > div { grid-template-columns: 1fr auto; }
   .archive-list > div a:last-child { grid-column: 2; }
   .map-tools { right: 12px; flex-wrap: wrap; }
+  .playback-status { top: 110px; width: calc(100% - 24px); flex-wrap: wrap; }
+  .playback-status small { white-space: normal; }
 }
 
 /* Breaking news & latest-update additions */

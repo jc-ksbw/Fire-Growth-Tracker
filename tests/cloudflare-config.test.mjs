@@ -14,10 +14,13 @@ test("declares the Cloudflare runtime bindings", async () => {
   assert.deepEqual(config.triggers.crons, ["0 13 * * *"]);
 });
 
-test("includes both perimeter-history migrations", async () => {
+test("includes perimeter and evacuation-history migrations", async () => {
   const first = await readFile(new URL("drizzle/0000_narrow_dust.sql", root), "utf8");
   const second = await readFile(new URL("drizzle/0001_rare_lord_tyger.sql", root), "utf8");
+  const third = await readFile(new URL("drizzle/0002_evacuation_timeline.sql", root), "utf8");
 
   assert.match(first, /CREATE TABLE [`\"]perimeter_snapshots[`\"]/);
   assert.match(second, /CREATE TABLE [`\"]fire_activity[`\"]/);
+  assert.match(third, /CREATE TABLE [`\"]evacuation_zone_state[`\"]/);
+  assert.match(third, /CREATE TABLE [`\"]evacuation_events[`\"]/);
 });

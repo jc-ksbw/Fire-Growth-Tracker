@@ -29,12 +29,14 @@ type ArchiveDay = { date: string; perimeterCount: number; capturedAt: number };
 type AlertPreferences = {
   coverageNewFires: boolean;
   evacuationChanges: boolean;
+  newPerimeters: boolean;
   growthThresholdAcres: number;
   containmentThresholdPoints: number;
 };
 const DEFAULT_ALERTS: AlertPreferences = {
   coverageNewFires: true,
   evacuationChanges: true,
+  newPerimeters: true,
   growthThresholdAcres: 100,
   containmentThresholdPoints: 10,
 };
@@ -48,6 +50,7 @@ export default function DmaSettings() {
   const [error, setError] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<AlertPreferences>(DEFAULT_ALERTS);
   const [alertsSaved, setAlertsSaved] = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("unsupported");
   const [metrics, setMetrics] = useState<MetricId[]>(DEFAULT_METRICS);
   const [metricsSaved, setMetricsSaved] = useState(false);
   const [archiveDays, setArchiveDays] = useState<ArchiveDay[]>([]);
@@ -61,6 +64,7 @@ export default function DmaSettings() {
       const storedAlerts = JSON.parse(localStorage.getItem(ALERT_STORAGE_KEY) ?? "null") as Partial<AlertPreferences> | null;
       if (storedAlerts) setAlerts({ ...DEFAULT_ALERTS, ...storedAlerts });
     } catch { localStorage.removeItem(ALERT_STORAGE_KEY); }
+    if ("Notification" in window) setNotificationPermission(Notification.permission);
     try {
       const storedMetrics = JSON.parse(localStorage.getItem(METRICS_STORAGE_KEY) ?? "null") as MetricId[] | null;
       if (Array.isArray(storedMetrics)) setMetrics(storedMetrics.slice(0, 5));
@@ -97,8 +101,8 @@ export default function DmaSettings() {
 
   const saveAlerts = async () => {
     localStorage.setItem(ALERT_STORAGE_KEY, JSON.stringify(alerts));
-    if ((alerts.coverageNewFires || alerts.evacuationChanges) && "Notification" in window && Notification.permission === "default") {
-      await Notification.requestPermission();
+    if ((alerts.coverageNewFires || alerts.evacuationChanges || alerts.newPerimeters) && "Notification" in window && Notification.permission === "default") {
+      setNotificationPermission(await Notification.requestPermission());
     }
     setAlertsSaved(true);
     window.setTimeout(() => setAlertsSaved(false), 2200);
@@ -186,6 +190,10 @@ export default function DmaSettings() {
           <Switch checked={alerts.coverageNewFires} onCheckedChange={(checked) => setAlerts((current) => ({ ...current, coverageNewFires: checked }))} aria-label="New fire alerts" />
         </div>
         <div className="alert-setting-row">
+          <div><strong>New perimeter published</strong><span>Notify whenever a followed fire receives a newer mapped perimeter.</span></div>
+          <Switch checked={alerts.newPerimeters} onCheckedChange={(checked) => setAlerts((current) => ({ ...current, newPerimeters: checked }))} aria-label="New perimeter alerts" />
+        </div>
+        <div className="alert-setting-row">
           <div><strong>Evacuation changes</strong><span>Notify when active evacuation zones touching a followed fire change.</span></div>
           <Switch checked={alerts.evacuationChanges} onCheckedChange={(checked) => setAlerts((current) => ({ ...current, evacuationChanges: checked }))} aria-label="Evacuation change alerts" />
         </div>
@@ -203,8 +211,14 @@ export default function DmaSettings() {
 
         <div className="settings-actions">
           <Button onClick={() => void saveAlerts()}>{alertsSaved ? <><Check size={15} /> Saved</> : "Save alert settings"}</Button>
+          <Button variant="outline" onClick={async () => {
+            if (!("Notification" in window)) return;
+            const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+            setNotificationPermission(permission);
+            if (permission === "granted") new Notification("Fire Growth Tracker test", { body: "Browser alerts are working.", icon: "/favicon.svg" });
+          }}>Test browser alert</Button>
         </div>
-        <p className="settings-source">Browser notifications require permission and are evaluated whenever the tracker is running and receives a fresh data update.</p>
+        <p className="settings-source">Browser notifications: {notificationPermission}. Alerts are evaluated whenever the tracker is running and receives a fresh data update.</p>
       </section>
 
       <section className="settings-card metric-settings-card">

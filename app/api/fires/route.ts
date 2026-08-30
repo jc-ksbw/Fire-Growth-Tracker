@@ -10,15 +10,14 @@ import {
 } from "@/lib/fire-feeds";
 import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots, seedHistoricalPerimeters } from "@/lib/perimeter-store";
 import { PERIMETER_RETENTION_MS } from "@/lib/capture";
+import { getNoaaHmsHotspots } from "@/lib/hotspot-feed";
+import { getActiveEvacuations } from "@/lib/evacuation-feed";
+import { saveEvacuationEvents } from "@/lib/evacuation-store";
 
 const NIFC_INCIDENTS =
   "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query";
-const NOAA_HMS_HOTSPOTS =
-  "https://services2.arcgis.com/C8EMgrsFcRFL6LrL/arcgis/rest/services/NOAA_Satellite_Fire_Detections_(v1)/FeatureServer/0/query";
 const CA_NEW_STARTS =
   "https://services.arcgis.com/BLN4oKB0N1YSgvY8/arcgis/rest/services/WFTIIC_IA_INCIDENTS_V1_PublicView_2/FeatureServer/0/query";
-const CAL_OES_EVACUATIONS =
-  "https://services.arcgis.com/BLN4oKB0N1YSgvY8/ArcGIS/rest/services/CA_EVACUATIONS_CalOESHosted_view/FeatureServer/0/query";
 
 type Geometry = {
   type: "Point" | "Polygon" | "MultiPolygon";
@@ -35,99 +34,6 @@ type FeatureCollection = { type: "FeatureCollection"; features: Feature[] };
 const emptyCollection = (): FeatureCollection => ({ type: "FeatureCollection", features: [] });
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
-
-function yearDayCode(date: Date) {
-  const year = date.getUTCFullYear();
-  const start = Date.UTC(year, 0, 1);
-  const day = Math.floor((Date.UTC(year, date.getUTCMonth(), date.getUTCDate()) - start) / 86_400_000) + 1;
-  return year * 1000 + day;
-}
-
-function hmsQueryUrl(where: string, options: { countOnly?: boolean; offset?: number } = {}) {
-  const params = new URLSearchParams({
-    where,
-    geometry: "-124.48,32.5,-114.13,42.1",
-    geometryType: "esriGeometryEnvelope",
-    inSR: "4326",
-    spatialRel: "esriSpatialRelIntersects",
-  });
-  if (options.countOnly) {
-    params.set("returnCountOnly", "true");
-    params.set("f", "json");
-  } else {
-    params.set("outFields", "FID,Lon,Lat,YearDay,Time,Satellite,Method,Ecosystem,FRP");
-    params.set("returnGeometry", "true");
-    params.set("outSR", "4326");
-    params.set("orderByFields", "FID ASC");
-    params.set("resultOffset", String(options.offset ?? 0));
-    params.set("resultRecordCount", "2000");
-    params.set("f", "geojson");
-  }
-  return `${NOAA_HMS_HOTSPOTS}?${params.toString()}`;
-}
-
-function hmsObservedAt(yearDayValue: unknown, timeValue: unknown) {
-  const yearDay = number(yearDayValue);
-  if (yearDay === null) return null;
-  const year = Math.floor(yearDay / 1000);
-  const day = yearDay % 1000;
-  const digits = (text(timeValue) ?? "0000").padStart(4, "0");
-  const hour = Number(digits.slice(0, 2));
-  const minute = Number(digits.slice(2, 4));
-  const value = Date.UTC(year, 0, day, Number.isFinite(hour) ? hour : 0, Number.isFinite(minute) ? minute : 0);
-  return Number.isFinite(value) ? value : null;
-}
-
-async function getNoaaHmsHotspots() {
-  const now = new Date();
-  const dayCodes = [0, 1, 2].map((daysAgo) => yearDayCode(new Date(now.getTime() - daysAgo * 86_400_000)));
-  const where = `YearDay IN (${dayCodes.join(",")})`;
-  const countResponse = await fetch(hmsQueryUrl(where, { countOnly: true }), { headers: { Accept: "application/json" } });
-  if (!countResponse.ok) throw new Error(`NOAA HMS hotspots returned ${countResponse.status}`);
-  const countPayload = await countResponse.json() as { count?: number; error?: { message?: string } };
-  if (countPayload.error) throw new Error(countPayload.error.message ?? "NOAA HMS hotspots failed");
-  const count = Math.max(0, countPayload.count ?? 0);
-  const pageCount = Math.min(Math.ceil(count / 2000), 5);
-  const pages = await Promise.all(
-    Array.from({ length: pageCount }, (_, page) =>
-      getGeoJson(hmsQueryUrl(where, { offset: page * 2000 }), `NOAA HMS hotspots page ${page + 1}`)),
-  );
-  const fetchedAt = Date.now();
-  const features = pages.flatMap((page) => page.features).map((feature) => {
-    const observedAt = hmsObservedAt(feature.properties.YearDay, feature.properties.Time);
-    return {
-      ...feature,
-      properties: {
-        ...feature.properties,
-        observedAt,
-        hours_old: observedAt === null ? 48 : Math.max(0, (fetchedAt - observedAt) / 3_600_000),
-        frp: number(feature.properties.FRP) ?? 0,
-        satellite: text(feature.properties.Satellite),
-        method: text(feature.properties.Method),
-        hotspotSource: "NOAA HMS",
-      },
-    } satisfies Feature;
-  });
-  // GOES revisits the same heat pixel repeatedly. Keep the newest observation
-  // in each roughly 500 m cell so the map shows distinct heat locations rather
-  // than thousands of stacked scans at identical coordinates.
-  const cells = new Map<string, Feature>();
-  for (const feature of features) {
-    const coordinates = point(feature);
-    if (!coordinates) continue;
-    const key = `${Math.round(coordinates[0] * 200)}:${Math.round(coordinates[1] * 200)}`;
-    const existing = cells.get(key);
-    const existingTime = number(existing?.properties.observedAt) ?? 0;
-    const incomingTime = number(feature.properties.observedAt) ?? 0;
-    if (!existing || incomingTime >= existingTime) {
-      const strongestFrp = Math.max(number(existing?.properties.frp) ?? 0, number(feature.properties.frp) ?? 0);
-      cells.set(key, { ...feature, properties: { ...feature.properties, frp: strongestFrp } });
-    } else {
-      existing.properties.frp = Math.max(number(existing.properties.frp) ?? 0, number(feature.properties.frp) ?? 0);
-    }
-  }
-  return { type: "FeatureCollection", features: [...cells.values()] } satisfies FeatureCollection;
-}
 
 function point(feature: Feature): [number, number] | null {
   if (feature.geometry?.type !== "Point" || !Array.isArray(feature.geometry.coordinates)) return null;
@@ -288,46 +194,6 @@ function dedupeFires(nifc: FeatureCollection, cwi: FeatureCollection) {
   return { type: "FeatureCollection", features: canonical } satisfies FeatureCollection;
 }
 
-function evacuationClass(statusValue: unknown) {
-  const status = (text(statusValue) ?? "").toUpperCase();
-  if (status.includes("SHELTER")) return "shelter";
-  if (status.includes("ORDER") || status.includes("LEVEL 3")) return "order";
-  if (status.includes("WARNING") || status.includes("LEVEL 2")) return "warning";
-  if (status.includes("ADVISORY") || status.includes("VOLUNTARY") || status.includes("LEVEL 1")) return "advisory";
-  return "other";
-}
-
-function isActiveEvacuation(statusValue: unknown) {
-  const status = (text(statusValue) ?? "").toUpperCase();
-  return Boolean(status)
-    && !status.includes("NORMAL")
-    && !status.includes("CLEAR")
-    && !status.includes("LIFTED")
-    && !status.includes("NO EVACUATION");
-}
-
-function dedupeEvacuations(collection: FeatureCollection) {
-  const priority: Record<string, number> = { order: 4, shelter: 3, warning: 2, advisory: 1, other: 0 };
-  const byZone = new Map<string, Feature>();
-  for (const feature of collection.features) {
-    if (!feature.geometry || !isActiveEvacuation(feature.properties.STATUS)) continue;
-    const statusClass = evacuationClass(feature.properties.STATUS);
-    const key = normalizedId(feature.properties.ZONE_ID)
-      ?? normalizedId(feature.properties.GlobalID)
-      ?? `EVAC-${feature.id ?? feature.properties.OBJECTID}`;
-    const prepared: Feature = { ...feature, properties: { ...feature.properties, evacuationClass: statusClass } };
-    const existing = byZone.get(key);
-    if (!existing) { byZone.set(key, prepared); continue; }
-    const existingClass = text(existing.properties.evacuationClass) ?? "other";
-    const incomingDate = number(prepared.properties.EDIT_DATE) ?? number(prepared.properties.EditDate) ?? 0;
-    const existingDate = number(existing.properties.EDIT_DATE) ?? number(existing.properties.EditDate) ?? 0;
-    if (priority[statusClass] > priority[existingClass] || (priority[statusClass] === priority[existingClass] && incomingDate > existingDate)) {
-      byZone.set(key, prepared);
-    }
-  }
-  return { type: "FeatureCollection", features: [...byZone.values()] } satisfies FeatureCollection;
-}
-
 export async function GET() {
   const incidentFields = [
     "IncidentName", "IncidentSize", "DiscoveryAcres", "FireDiscoveryDateTime",
@@ -339,16 +205,11 @@ export async function GET() {
     "FireIdentifier", "IncidentSize", "CreatedOnDateTime", "DataSource", "IncidentNumber",
     "FireDiscoveryDateTime", "UNIT", "UNITCODE", "REGION", "FireMAR", "globalid",
   ].join(",");
-  const evacuationFields = [
-    "COUNTY", "CITY", "ZONE_NAME", "ZONE_ID", "STATUS", "EVENT_TYPE", "CRITICAL_INFO",
-    "PUBLIC_INFO", "EDIT_DATE", "STATEWIDE_LAST_UPDATED", "NOTES", "GlobalID", "EditDate",
-  ].join(",");
-
   const results = await Promise.allSettled([
     getGeoJson(queryUrl(NIFC_INCIDENTS, incidentFields, "IncidentTypeCategory='WF' AND POOState='US-CA'"), "NIFC incidents"),
     getGeoJson(queryUrl(CA_PERIMETERS, PERIMETER_FIELDS, "displayStatus='Active'", true), "California fire perimeters"),
     getGeoJson(queryUrl(CA_NEW_STARTS, cwiFields, "1=1"), "CA Wildfire Intel"),
-    getGeoJson(queryUrl(CAL_OES_EVACUATIONS, evacuationFields, "STATUS IS NOT NULL AND STATUS <> 'Normal'", true), "CAL OES evacuations"),
+    getActiveEvacuations(),
     getNoaaHmsHotspots(),
   ]);
 
@@ -359,7 +220,7 @@ export async function GET() {
   const nifc = value(0);
   const perimeters = dedupePerimeters(value(1));
   const cwi = value(2);
-  const evacuations = dedupeEvacuations(value(3));
+  const evacuations = value(3);
   // NOAA is already queried with a California bounding envelope. The precise
   // selected-DMA polygon is applied in the client; a simplified state outline
   // incorrectly excluded the Big Sur coast, including Timber and Plaskett.
@@ -372,6 +233,7 @@ export async function GET() {
 
   let snapshotsSaved = 0;
   let historicalSnapshotsSeeded = 0;
+  let evacuationEventsDetected = 0;
   let historyAvailable = true;
   try {
     historicalSnapshotsSeeded = await seedHistoricalPerimeters();
@@ -381,6 +243,13 @@ export async function GET() {
       .filter((identity): identity is { irwinId: string; incidentName: string } => identity !== null);
     await markFiresActive(active, Date.now());
     await purgePerimeterHistory(Date.now() - PERIMETER_RETENTION_MS);
+    if (results[3].status === "fulfilled") {
+      const evacuationResult = await saveEvacuationEvents(
+        evacuations.features as Parameters<typeof saveEvacuationEvents>[0],
+        Date.now() - PERIMETER_RETENTION_MS,
+      );
+      evacuationEventsDetected = evacuationResult.eventsDetected;
+    }
   } catch {
     historyAvailable = false;
   }
@@ -402,6 +271,7 @@ export async function GET() {
       fetchedAt: Date.now(),
       historyAvailable,
       historicalSnapshotsSeeded,
+      evacuationEventsDetected,
       snapshotsSaved,
       feedStatus,
       sources: {

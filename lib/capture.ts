@@ -7,6 +7,8 @@ import {
   queryUrl,
 } from "./fire-feeds";
 import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots, seedHistoricalPerimeters } from "./perimeter-store";
+import { getActiveEvacuations } from "./evacuation-feed";
+import { saveEvacuationEvents } from "./evacuation-store";
 
 /** Today's archive plus the previous 19 UTC days are retained. */
 export const PERIMETER_RETENTION_MS = 20 * 86_400_000;
@@ -21,10 +23,13 @@ export const PERIMETER_RETENTION_MS = 20 * 86_400_000;
  */
 export async function runCapture() {
   const startedAt = Date.now();
-  const raw = await getGeoJson(
-    queryUrl(CA_PERIMETERS, PERIMETER_FIELDS, "displayStatus='Active'", true),
-    "California fire perimeters",
-  );
+  const [raw, evacuationResult] = await Promise.all([
+    getGeoJson(
+      queryUrl(CA_PERIMETERS, PERIMETER_FIELDS, "displayStatus='Active'", true),
+      "California fire perimeters",
+    ),
+    getActiveEvacuations().then((value) => ({ value, error: null })).catch((error: unknown) => ({ value: null, error })),
+  ]);
   const historicalSnapshotsSeeded = await seedHistoricalPerimeters();
   const perimeters = dedupePerimeters(raw);
   const snapshotsSaved = await savePerimeterSnapshots(
@@ -35,6 +40,12 @@ export async function runCapture() {
     .filter((identity): identity is { irwinId: string; incidentName: string } => identity !== null);
   const activeMarked = await markFiresActive(active, startedAt);
   const purge = await purgePerimeterHistory(startedAt - PERIMETER_RETENTION_MS);
+  const evacuationHistory = evacuationResult.value
+    ? await saveEvacuationEvents(
+      evacuationResult.value.features as Parameters<typeof saveEvacuationEvents>[0],
+      startedAt - PERIMETER_RETENTION_MS,
+    )
+    : { eventsDetected: 0, eventsDeleted: 0 };
   return {
     capturedAt: startedAt,
     activePerimeters: perimeters.features.length,
@@ -43,6 +54,9 @@ export async function runCapture() {
     activeMarked,
     activityRowsDeleted: purge.activityRowsDeleted,
     snapshotsDeleted: purge.snapshotsDeleted,
+    evacuationEventsDetected: evacuationHistory.eventsDetected,
+    evacuationEventsDeleted: evacuationHistory.eventsDeleted,
+    evacuationsAvailable: evacuationResult.error === null,
     durationMs: Date.now() - startedAt,
   };
 }
