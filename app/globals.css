@@ -223,6 +223,8 @@ button { font-family: inherit; }
 .incident-source-note span { color: #747e79; font-size: 9px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
 .incident-source-note p { margin: 5px 0 0; color: #b9bfbb; font-size: 10px; line-height: 1.4; }
 .incident-source-note small { display: block; margin-top: 4px; color: #ffad68; font-size: 9px; }
+.incident-official-link { display: flex; align-items: center; gap: 5px; margin-top: 7px; color: #ffbd79; font-size: 9px; text-decoration: none; }
+.incident-official-link:hover { text-decoration: underline; }
 .satellite-card, .growth-card, .evacuation-info-card, .camera-card { padding: 16px; border-bottom: 1px solid #2b3336; }
 .evacuation-info-card > p { margin: 0; color: #c3c7c3; font-size: 13px; line-height: 1.65; white-space: pre-line; }
 .evacuation-info-card > p + p { margin-top: 10px; }

@@ -1626,6 +1626,7 @@ export default function FireDashboard() {
       nifcIncidents: "NIFC incidents",
       caPerimeters: "California perimeters",
       caWildfireIntel: "CA Wildfire Intel",
+      calFireIncidents: "CAL FIRE incident status",
       calOesEvacuations: "CAL OES evacuations",
       viirsHotspots: "NOAA HMS hotspots",
     }[name] ?? name))
@@ -2254,7 +2255,9 @@ export default function FireDashboard() {
                 <span>Unified record</span>
                 <p>{Array.isArray(selected.properties.sources) ? (selected.properties.sources as string[]).join(" + ") : "NIFC WFIGS"}</p>
                 {(numberValue(selected.properties.sourceReports) ?? 1) > 1 && <small>{numberValue(selected.properties.sourceReports)} matching source reports merged</small>}
+                {textValue(selected.properties.ReportedAcresSource) && <small>Current acreage: {textValue(selected.properties.ReportedAcresSource)}{numberValue(selected.properties.ReportedAcresUpdatedAt) !== null ? ` • ${formatDate(selected.properties.ReportedAcresUpdatedAt, true)}` : ""}</small>}
                 {selectedPerimeter && <small>Latest perimeter: {textValue(selectedPerimeter.properties.perimeterSource) ?? "CAL FIRE / FIRIS / NIFC"} • {formatAcres(selectedPerimeter.properties.poly_Acres_AutoCalc)}</small>}
+                {textValue(selected.properties.CalFireUrl) && <a className="incident-official-link" href={textValue(selected.properties.CalFireUrl) as string} target="_blank" rel="noreferrer">Open official CAL FIRE incident page <ExternalLink size={11} /></a>}
               </div>
 
               <section className="camera-card">
@@ -2433,7 +2436,7 @@ export default function FireDashboard() {
         </aside>
       </section>
       <footer>
-        California-only view. New starts: CA Wildfire Intel. Perimeters: CAL FIRE intelligence, FIRIS and NIFC. Hotspots: NOAA HMS satellite detections. Evacuations: CAL OES. Operational data may be revised.
+        California-only view. Established-fire status: CAL FIRE incident API. New starts: CA Wildfire Intel. Perimeters: CAL FIRE intelligence, FIRIS and NIFC. Hotspots: NOAA HMS satellite detections. Evacuations: CAL OES. Operational data may be revised.
       </footer>
       <Toaster position="top-center" />
     </main>

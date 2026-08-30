@@ -4,6 +4,7 @@ import {
   activeFireIdentity,
   dedupePerimeters,
   getGeoJson,
+  normalizePerimeters,
   queryUrl,
 } from "./fire-feeds";
 import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots, seedHistoricalPerimeters } from "./perimeter-store";
@@ -17,7 +18,7 @@ export const PERIMETER_RETENTION_MS = 20 * 86_400_000;
  * One autonomous capture cycle. Runs from the Worker cron trigger and from the
  * token-protected /api/capture route, with no browser involved:
  *  1. Fetch the current active CAL FIRE / FIRIS / NIFC perimeters.
- *  2. Save or refresh today's latest shape for every active perimeter.
+ *  2. Save every unique CAL FIRE/FIRIS source shape before live-map dedupe.
  *  3. Mark every fire seen in the active feed as active right now.
  *  4. Purge archive rows older than the rolling 20-day window.
  */
@@ -31,9 +32,10 @@ export async function runCapture() {
     getActiveEvacuations().then((value) => ({ value, error: null })).catch((error: unknown) => ({ value: null, error })),
   ]);
   const historicalSnapshotsSeeded = await seedHistoricalPerimeters();
+  const historicalPerimeters = normalizePerimeters(raw);
   const perimeters = dedupePerimeters(raw);
   const snapshotsSaved = await savePerimeterSnapshots(
-    perimeters.features as Parameters<typeof savePerimeterSnapshots>[0],
+    historicalPerimeters.features as Parameters<typeof savePerimeterSnapshots>[0],
   );
   const active = perimeters.features
     .map(activeFireIdentity)

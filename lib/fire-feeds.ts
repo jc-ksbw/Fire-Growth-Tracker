@@ -7,7 +7,8 @@ export const CA_PERIMETERS =
 
 export const PERIMETER_FIELDS = [
   "GlobalID", "type", "source", "poly_DateCurrent", "mission", "incident_name",
-  "incident_number", "area_acres", "description", "FireDiscoveryDate", "displayStatus",
+  "incident_number", "area_acres", "NIFC_GISAcres", "description", "FireDiscoveryDate",
+  "EditDate", "displayStatus", "websiteId", "websiteDbId", "dataverseId",
 ].join(",");
 
 export type Geometry = {
@@ -64,7 +65,7 @@ export function normalizedName(value: unknown) {
     .replace(/\s+/g, " ");
 }
 
-function normalizePerimeter(feature: Feature): Feature {
+export function normalizePerimeter(feature: Feature): Feature {
   const p = feature.properties;
   const name = text(p.incident_name) ?? text(p.mission) ?? "Unnamed perimeter";
   const incidentId = text(p.incident_number);
@@ -84,8 +85,38 @@ function normalizePerimeter(feature: Feature): Feature {
       attr_POOState: "US-CA",
       perimeterSource: text(p.source) ?? "CAL FIRE / FIRIS / NIFC",
       perimeterType: text(p.type) ?? "Fire perimeter",
+      calFireWebsiteId: text(p.websiteId),
     },
   };
+}
+
+/**
+ * Normalize every source perimeter before either archiving or reducing it for
+ * the live map. CAL FIRE/FIRIS sometimes publishes the first flight polygons
+ * before assigning an IRWIN ID; once a later shape has that ID, backfill it
+ * onto same-named shapes so the complete progression can be retained.
+ *
+ * California-specific: this identifier repair must not be applied to a future
+ * national perimeter feed because incident names can collide across states.
+ */
+export function normalizePerimeters(collection: FeatureCollection) {
+  const features = collection.features.map(normalizePerimeter);
+  const idsByName = new Map<string, string>();
+  for (const feature of [...features].sort((a, b) =>
+    (number(b.properties.poly_PolygonDateTime) ?? 0) - (number(a.properties.poly_PolygonDateTime) ?? 0))) {
+    const name = normalizedName(feature.properties.poly_IncidentName);
+    const id = normalizedId(feature.properties.poly_IRWINID);
+    if (name && id && !idsByName.has(name)) idsByName.set(name, id);
+  }
+  return {
+    type: "FeatureCollection",
+    features: features.map((feature) => {
+      if (normalizedId(feature.properties.poly_IRWINID)) return feature;
+      const inferred = idsByName.get(normalizedName(feature.properties.poly_IncidentName));
+      if (!inferred) return feature;
+      return { ...feature, properties: { ...feature.properties, poly_IRWINID: inferred, attr_IrwinID: inferred } };
+    }),
+  } satisfies FeatureCollection;
 }
 
 function oneEditApart(a: string, b: string) {
@@ -116,9 +147,8 @@ function likelySamePerimeter(a: Feature, b: Feature) {
 
 export function dedupePerimeters(collection: FeatureCollection) {
   const latest: Feature[] = [];
-  for (const raw of collection.features) {
-    if (raw.geometry?.type !== "Polygon" && raw.geometry?.type !== "MultiPolygon") continue;
-    const feature = normalizePerimeter(raw);
+  for (const feature of normalizePerimeters(collection).features) {
+    if (feature.geometry?.type !== "Polygon" && feature.geometry?.type !== "MultiPolygon") continue;
     const existingIndex = latest.findIndex((candidate) => likelySamePerimeter(candidate, feature));
     if (existingIndex === -1) { latest.push(feature); continue; }
     const existing = latest[existingIndex];

@@ -18,6 +18,15 @@ const textValue = (value: unknown) =>
 const numberValue = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
 
+function stableHash(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 type HistoricalSeedRow = {
   versionKey: string;
   capturedAt: number;
@@ -70,8 +79,9 @@ export async function seedHistoricalPerimeters() {
     inserted = rows.length;
   }
 
-  // Older releases used more than one identifier/version format and could
-  // leave duplicate same-day rows. Keep the newest capture for each fire/day.
+  // Older daily-capture releases could leave duplicate daily rows. Restrict
+  // this repair to legacy daily keys; source-shape rows intentionally preserve
+  // multiple meaningful CAL FIRE/FIRIS perimeters published on the same day.
   await db.prepare(
     `DELETE FROM perimeter_snapshots
      WHERE rowid IN (
@@ -82,7 +92,7 @@ export async function seedHistoricalPerimeters() {
                                substr(datetime(captured_at / 1000, 'unixepoch'), 1, 10)
                   ORDER BY captured_at DESC, COALESCE(perimeter_date, 0) DESC, rowid DESC
                 ) AS daily_rank
-         FROM perimeter_snapshots
+         FROM perimeter_snapshots WHERE version_key LIKE 'daily-%'
        ) WHERE daily_rank > 1
      )`,
   ).run();
@@ -92,7 +102,6 @@ export async function seedHistoricalPerimeters() {
 export async function savePerimeterSnapshots(features: PerimeterFeature[]) {
   const db = getBinding();
   const capturedAt = Date.now();
-  const archiveDay = new Date(capturedAt).toISOString().slice(0, 10);
   const statements: D1PreparedStatement[] = [];
 
   for (const feature of features) {
@@ -109,7 +118,11 @@ export async function savePerimeterSnapshots(features: PerimeterFeature[]) {
 
     const geometryJson = JSON.stringify(feature.geometry);
     const perimeterDate = numberValue(p.poly_PolygonDateTime) ?? numberValue(p.poly_DateCurrent);
-    const versionKey = `daily-${archiveDay}`;
+    // Geometry identity collapses duplicate copies of the same flight shape,
+    // while retaining every genuinely different perimeter—including multiple
+    // updates in one day—for progression playback.
+    const versionKey = `shape-${stableHash(geometryJson)}`;
+    const eventCapturedAt = perimeterDate ?? capturedAt;
     statements.push(
       db.prepare(
         `INSERT INTO perimeter_snapshots
@@ -131,7 +144,7 @@ export async function savePerimeterSnapshots(features: PerimeterFeature[]) {
         textValue(p.attr_UniqueFireIdentifier),
         incidentName,
         versionKey,
-        capturedAt,
+        eventCapturedAt,
         perimeterDate,
         acres,
         contained,
@@ -233,17 +246,17 @@ export async function getPerimeterHistory(irwinId: string) {
          SELECT incident_name, captured_at, perimeter_date, acres, contained,
                 state, county, geometry_json,
                 ROW_NUMBER() OVER (
-                  PARTITION BY substr(datetime(captured_at / 1000, 'unixepoch'), 1, 10)
-                  ORDER BY captured_at DESC, COALESCE(perimeter_date, 0) DESC, rowid DESC
-                ) AS daily_rank
+                  PARTITION BY geometry_json
+                  ORDER BY COALESCE(perimeter_date, captured_at) DESC, rowid DESC
+                ) AS shape_rank
          FROM perimeter_snapshots
          WHERE lower(replace(replace(irwin_id, '{', ''), '}', '')) = ?
        )
        SELECT incident_name, captured_at, perimeter_date, acres, contained,
               state, county, geometry_json
-       FROM ranked WHERE daily_rank = 1
+       FROM ranked WHERE shape_rank = 1
        ORDER BY COALESCE(perimeter_date, captured_at) ASC
-       LIMIT 20`,
+       LIMIT 100`,
     )
     .bind(normalizedIrwinId)
     .all<{

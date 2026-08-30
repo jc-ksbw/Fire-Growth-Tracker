@@ -6,6 +6,7 @@ import {
   getGeoJson,
   normalizedId,
   normalizedName,
+  normalizePerimeters,
   queryUrl,
 } from "@/lib/fire-feeds";
 import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots, seedHistoricalPerimeters } from "@/lib/perimeter-store";
@@ -13,6 +14,7 @@ import { PERIMETER_RETENTION_MS } from "@/lib/capture";
 import { getNoaaHmsHotspots } from "@/lib/hotspot-feed";
 import { getActiveEvacuations } from "@/lib/evacuation-feed";
 import { saveEvacuationEvents } from "@/lib/evacuation-store";
+import { getCalFireActiveIncidents } from "@/lib/cal-fire-incidents";
 
 const NIFC_INCIDENTS =
   "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query";
@@ -177,7 +179,47 @@ function mergeFire(target: Feature, incoming: Feature) {
   }
 }
 
-function dedupeFires(nifc: FeatureCollection, cwi: FeatureCollection) {
+function calFireFeature(feature: Feature, rawPerimeters: FeatureCollection) {
+  const calFireId = normalizedId(feature.properties.CalFireUniqueId);
+  const bridge = rawPerimeters.features
+    .filter((perimeter) => normalizedId(perimeter.properties.websiteId) === calFireId)
+    .sort((a, b) => (number(b.properties.poly_DateCurrent) ?? 0) - (number(a.properties.poly_DateCurrent) ?? 0))[0];
+  const irwinId = normalizedId(bridge?.properties.incident_number);
+  return {
+    ...feature,
+    properties: {
+      ...feature.properties,
+      IrwinID: irwinId,
+      UniqueFireIdentifier: irwinId,
+      CanonicalID: irwinId ?? calFireId ?? feature.properties.CanonicalID,
+    },
+  };
+}
+
+function mergeCalFire(target: Feature, incoming: Feature) {
+  mergeFire(target, incoming);
+  // CAL FIRE's incident record is the authoritative reported acreage and
+  // containment for this California-only workflow, even when NIFC lags.
+  for (const key of [
+    "IncidentSize", "PercentContained", "ModifiedOnDateTime_dt", "CalFireUniqueId",
+    "CalFireUrl", "ReportedAcresSource", "ReportedAcresUpdatedAt", "regionalWorkflow",
+  ]) {
+    const value = incoming.properties[key];
+    if (value !== null && value !== undefined && value !== "") target.properties[key] = value;
+  }
+}
+
+function matchingPerimeter(fire: Feature, perimeters: FeatureCollection) {
+  const fireIds = new Set(ids(fire));
+  const fireName = normalizedName(fire.properties.IncidentName);
+  return perimeters.features.find((perimeter) => {
+    const perimeterId = normalizedId(perimeter.properties.poly_IRWINID ?? perimeter.properties.attr_IrwinID);
+    if (perimeterId && fireIds.has(perimeterId)) return true;
+    return Boolean(fireName && fireName === normalizedName(perimeter.properties.poly_IncidentName ?? perimeter.properties.attr_IncidentName));
+  });
+}
+
+function dedupeFires(nifc: FeatureCollection, cwi: FeatureCollection, calFire: FeatureCollection, rawPerimeters: FeatureCollection) {
   const canonical: Feature[] = [];
   for (const raw of nifc.features) {
     if (raw.geometry?.type !== "Point") continue;
@@ -191,7 +233,32 @@ function dedupeFires(nifc: FeatureCollection, cwi: FeatureCollection) {
     const match = canonical.find((candidate) => likelySameIncident(candidate, incoming));
     if (match) mergeFire(match, incoming); else canonical.push(incoming);
   }
+  // California-specific: CAL FIRE records are merged only into the already
+  // California-filtered incident collection. A future national route must not
+  // run this loop for incidents outside US-CA.
+  for (const raw of calFire.features) {
+    const incoming = calFireFeature(raw, rawPerimeters);
+    const match = canonical.find((candidate) => likelySameIncident(candidate, incoming));
+    if (match) mergeCalFire(match, incoming); else canonical.push(incoming);
+  }
   return { type: "FeatureCollection", features: canonical } satisfies FeatureCollection;
+}
+
+function applyLatestMappedAcreage(fires: FeatureCollection, perimeters: FeatureCollection) {
+  for (const fire of fires.features) {
+    const perimeter = matchingPerimeter(fire, perimeters);
+    if (!perimeter) continue;
+    const mappedAcres = number(perimeter.properties.poly_Acres_AutoCalc) ?? number(perimeter.properties.poly_GISAcres);
+    const mappedAt = number(perimeter.properties.poly_PolygonDateTime ?? perimeter.properties.poly_DateCurrent);
+    fire.properties.MappedAcres = mappedAcres;
+    fire.properties.MappedAcresUpdatedAt = mappedAt;
+    if (fire.properties.ReportedAcresSource !== "CAL FIRE" && mappedAcres !== null) {
+      fire.properties.NifcIncidentSize = number(fire.properties.IncidentSize);
+      fire.properties.IncidentSize = mappedAcres;
+      fire.properties.ReportedAcresSource = "CAL FIRE perimeter";
+      fire.properties.ReportedAcresUpdatedAt = mappedAt;
+    }
+  }
 }
 
 export async function GET() {
@@ -209,6 +276,7 @@ export async function GET() {
     getGeoJson(queryUrl(NIFC_INCIDENTS, incidentFields, "IncidentTypeCategory='WF' AND POOState='US-CA'"), "NIFC incidents"),
     getGeoJson(queryUrl(CA_PERIMETERS, PERIMETER_FIELDS, "displayStatus='Active'", true), "California fire perimeters"),
     getGeoJson(queryUrl(CA_NEW_STARTS, cwiFields, "1=1"), "CA Wildfire Intel"),
+    getCalFireActiveIncidents(),
     getActiveEvacuations(),
     getNoaaHmsHotspots(),
   ]);
@@ -218,18 +286,22 @@ export async function GET() {
     return result.status === "fulfilled" ? result.value : emptyCollection();
   };
   const nifc = value(0);
-  const perimeters = dedupePerimeters(value(1));
+  const rawPerimeters = value(1);
+  const historicalPerimeters = normalizePerimeters(rawPerimeters);
+  const perimeters = dedupePerimeters(rawPerimeters);
   const cwi = value(2);
-  const evacuations = value(3);
+  const calFire = value(3);
+  const evacuations = value(4);
   // NOAA is already queried with a California bounding envelope. The precise
   // selected-DMA polygon is applied in the client; a simplified state outline
   // incorrectly excluded the Big Sur coast, including Timber and Plaskett.
-  const hotspots = value(4);
+  const hotspots = value(5);
   if (results[0].status === "rejected" && results[2].status === "rejected") {
     const message = results[0].reason instanceof Error ? results[0].reason.message : "California fire feeds are unavailable";
     return Response.json({ error: message }, { status: 502 });
   }
-  const fires = dedupeFires(nifc, cwi);
+  const fires = dedupeFires(nifc, cwi, calFire, rawPerimeters);
+  applyLatestMappedAcreage(fires, perimeters);
 
   let snapshotsSaved = 0;
   let historicalSnapshotsSeeded = 0;
@@ -237,13 +309,15 @@ export async function GET() {
   let historyAvailable = true;
   try {
     historicalSnapshotsSeeded = await seedHistoricalPerimeters();
-    snapshotsSaved = await savePerimeterSnapshots(perimeters.features as Parameters<typeof savePerimeterSnapshots>[0]);
+    // Archive every unique source shape before the live-map reduction. This
+    // captures intraday CAL FIRE/FIRIS progression without daily KML files.
+    snapshotsSaved = await savePerimeterSnapshots(historicalPerimeters.features as Parameters<typeof savePerimeterSnapshots>[0]);
     const active = perimeters.features
       .map((feature) => activeFireIdentity(feature as Parameters<typeof activeFireIdentity>[0]))
       .filter((identity): identity is { irwinId: string; incidentName: string } => identity !== null);
     await markFiresActive(active, Date.now());
     await purgePerimeterHistory(Date.now() - PERIMETER_RETENTION_MS);
-    if (results[3].status === "fulfilled") {
+    if (results[4].status === "fulfilled") {
       const evacuationResult = await saveEvacuationEvents(
         evacuations.features as Parameters<typeof saveEvacuationEvents>[0],
         Date.now() - PERIMETER_RETENTION_MS,
@@ -258,8 +332,9 @@ export async function GET() {
     nifcIncidents: results[0].status === "fulfilled",
     caPerimeters: results[1].status === "fulfilled",
     caWildfireIntel: results[2].status === "fulfilled",
-    calOesEvacuations: results[3].status === "fulfilled",
-    viirsHotspots: results[4].status === "fulfilled",
+    calFireIncidents: results[3].status === "fulfilled",
+    calOesEvacuations: results[4].status === "fulfilled",
+    viirsHotspots: results[5].status === "fulfilled",
   };
 
   return Response.json(
@@ -277,6 +352,7 @@ export async function GET() {
       sources: {
         incidents: "NIFC WFIGS current incidents",
         newStarts: "California Wildfire Intel (IRWIN, PulsePoint, NOAA and CHP)",
+        reportedFireStatus: "CAL FIRE active incidents (California only)",
         perimeters: "CAL FIRE California Perimeters (CAL FIRE intelligence, FIRIS and NIFC)",
         evacuations: "CAL OES California Active Evacuation Zones",
         hotspots: "NOAA Hazard Mapping System satellite fire detections",
