@@ -108,7 +108,25 @@ async function getNoaaHmsHotspots() {
       },
     } satisfies Feature;
   });
-  return { type: "FeatureCollection", features } satisfies FeatureCollection;
+  // GOES revisits the same heat pixel repeatedly. Keep the newest observation
+  // in each roughly 500 m cell so the map shows distinct heat locations rather
+  // than thousands of stacked scans at identical coordinates.
+  const cells = new Map<string, Feature>();
+  for (const feature of features) {
+    const coordinates = point(feature);
+    if (!coordinates) continue;
+    const key = `${Math.round(coordinates[0] * 200)}:${Math.round(coordinates[1] * 200)}`;
+    const existing = cells.get(key);
+    const existingTime = number(existing?.properties.observedAt) ?? 0;
+    const incomingTime = number(feature.properties.observedAt) ?? 0;
+    if (!existing || incomingTime >= existingTime) {
+      const strongestFrp = Math.max(number(existing?.properties.frp) ?? 0, number(feature.properties.frp) ?? 0);
+      cells.set(key, { ...feature, properties: { ...feature.properties, frp: strongestFrp } });
+    } else {
+      existing.properties.frp = Math.max(number(existing.properties.frp) ?? 0, number(feature.properties.frp) ?? 0);
+    }
+  }
+  return { type: "FeatureCollection", features: [...cells.values()] } satisfies FeatureCollection;
 }
 
 function point(feature: Feature): [number, number] | null {
