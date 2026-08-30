@@ -11,7 +11,7 @@ test("declares the Cloudflare runtime bindings", async () => {
   assert.equal(config.assets.binding, "ASSETS");
   assert.equal(config.images.binding, "IMAGES");
   assert.equal(config.d1_databases[0].binding, "DB");
-  assert.deepEqual(config.triggers.crons, ["0 13 * * *"]);
+  assert.deepEqual(config.triggers.crons, ["0 * * * *"]);
 });
 
 test("includes perimeter and evacuation-history migrations", async () => {

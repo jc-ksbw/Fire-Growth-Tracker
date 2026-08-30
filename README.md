@@ -1,18 +1,31 @@
 # Fire Growth Tracker
 
 A live wildfire intelligence dashboard for tracking active incidents, perimeter
-growth, satellite hotspots, evacuation information, weather conditions, and
+growth, satellite hotspots, evacuation information, road closures, and
 shareable incident views.
 
 ## Features
 
 - Current wildfire perimeters from CAL FIRE, FIRIS, and NIFC sources
-- Historical perimeter playback and growth comparison
-- NASA FIRMS satellite hotspot overlay
-- Evacuation-zone and public-warning links
-- Incident weather, wind, humidity, and Red Flag Warning context
+- CAL FIRE reported acreage and containment for established California fires
+- Historical perimeter, hotspot, and evacuation playback
+- NOAA HMS satellite hotspot overlay
+- CAL OES evacuation zones and Caltrans road closures
 - Shareable fire links plus exportable 1280×720 growth graphics
-- Automated daily perimeter capture with 48-hour post-incident retention
+- Automated hourly perimeter capture with a rolling 20-day archive
+
+## California data workflow
+
+CAL FIRE's public incident API is authoritative for reported acreage and
+containment on established California fires. Its `UniqueId` joins to the live
+CAL FIRE/FIRIS perimeter layer's `websiteId`; that layer's `incident_number`
+then joins to the national NIFC IRWIN record. Every distinct source perimeter
+is archived before the live map is reduced to the newest shape.
+
+This workflow is intentionally California-specific. If national coverage is
+added, CAL FIRE enrichment must remain limited to incidents with `POOState` of
+`US-CA`; incidents in other states must use their own authoritative state or
+federal sources.
 
 ## Local development
 
@@ -46,9 +59,9 @@ provides the D1, Assets, and Images bindings declared in `wrangler.jsonc`.
    npm run deploy
    ```
 
-The Worker includes a daily cron trigger at `13:00 UTC`. It captures active
-perimeters and removes history 48 hours after an incident disappears from the
-active feed. As an alternative, set a `CAPTURE_TOKEN` secret of at least 16
+The Worker includes an hourly cron trigger. It captures every distinct active
+perimeter and maintains a rolling 20-day archive. As an alternative, set a
+`CAPTURE_TOKEN` secret of at least 16
 characters and schedule authenticated `POST /api/capture` requests.
 
 ## GitHub Actions

@@ -45,8 +45,8 @@ const worker = {
   },
 
   /**
-   * Cron-triggered perimeter capture. Register a daily schedule (e.g. "0 13 * * *",
-   * 6:00 AM Pacific) with the hosting platform's cron/trigger configuration; the
+   * Cron-triggered perimeter capture. Register an hourly schedule ("0 * * * *")
+   * with the hosting platform's cron/trigger configuration; the
    * capture then runs with no user input. Environments without cron support can
    * instead point any external scheduler at POST /api/capture with CAPTURE_TOKEN.
    */
