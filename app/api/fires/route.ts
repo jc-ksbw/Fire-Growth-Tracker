@@ -8,12 +8,11 @@ import {
   normalizedName,
   normalizePerimeters,
   queryUrl,
+  CALIFORNIA_PERIMETER_BOUNDS,
 } from "@/lib/fire-feeds";
-import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots, seedHistoricalPerimeters } from "@/lib/perimeter-store";
-import { PERIMETER_RETENTION_MS } from "@/lib/capture";
+
 import { getNoaaHmsHotspots } from "@/lib/hotspot-feed";
 import { getActiveEvacuations } from "@/lib/evacuation-feed";
-import { saveEvacuationEvents } from "@/lib/evacuation-store";
 import { getCalFireActiveIncidents } from "@/lib/cal-fire-incidents";
 
 const NIFC_INCIDENTS =
@@ -274,7 +273,7 @@ export async function GET() {
   ].join(",");
   const results = await Promise.allSettled([
     getGeoJson(queryUrl(NIFC_INCIDENTS, incidentFields, "IncidentTypeCategory='WF' AND POOState='US-CA'"), "NIFC incidents"),
-    getGeoJson(queryUrl(CA_PERIMETERS, PERIMETER_FIELDS, "displayStatus='Active'", true), "California fire perimeters"),
+    getGeoJson(queryUrl(CA_PERIMETERS, PERIMETER_FIELDS, "displayStatus='Active'", true, CALIFORNIA_PERIMETER_BOUNDS), "California fire perimeters"),
     getGeoJson(queryUrl(CA_NEW_STARTS, cwiFields, "1=1"), "CA Wildfire Intel"),
     getCalFireActiveIncidents(),
     getActiveEvacuations(),
@@ -287,7 +286,6 @@ export async function GET() {
   };
   const nifc = value(0);
   const rawPerimeters = value(1);
-  const historicalPerimeters = normalizePerimeters(rawPerimeters);
   const perimeters = dedupePerimeters(rawPerimeters);
   const cwi = value(2);
   const calFire = value(3);
@@ -303,30 +301,13 @@ export async function GET() {
   const fires = dedupeFires(nifc, cwi, calFire, rawPerimeters);
   applyLatestMappedAcreage(fires, perimeters);
 
-  let snapshotsSaved = 0;
-  let historicalSnapshotsSeeded = 0;
-  let evacuationEventsDetected = 0;
-  let historyAvailable = true;
-  try {
-    historicalSnapshotsSeeded = await seedHistoricalPerimeters();
-    // Archive every unique source shape before the live-map reduction. This
-    // captures intraday CAL FIRE/FIRIS progression without daily KML files.
-    snapshotsSaved = await savePerimeterSnapshots(historicalPerimeters.features as Parameters<typeof savePerimeterSnapshots>[0]);
-    const active = perimeters.features
-      .map((feature) => activeFireIdentity(feature as Parameters<typeof activeFireIdentity>[0]))
-      .filter((identity): identity is { irwinId: string; incidentName: string } => identity !== null);
-    await markFiresActive(active, Date.now());
-    await purgePerimeterHistory(Date.now() - PERIMETER_RETENTION_MS);
-    if (results[4].status === "fulfilled") {
-      const evacuationResult = await saveEvacuationEvents(
-        evacuations.features as Parameters<typeof saveEvacuationEvents>[0],
-        Date.now() - PERIMETER_RETENTION_MS,
-      );
-      evacuationEventsDetected = evacuationResult.eventsDetected;
-    }
-  } catch {
-    historyAvailable = false;
-  }
+  // This endpoint is intentionally read-only. The hourly Worker cron in
+  // lib/capture.ts is the single history writer, preventing dashboard refreshes
+  // and crawlers from consuming D1 write quota.
+  const historyAvailable = true;
+  const historicalSnapshotsSeeded = 0;
+  const snapshotsSaved = 0;
+  const evacuationEventsDetected = 0;
 
   const feedStatus = {
     nifcIncidents: results[0].status === "fulfilled",

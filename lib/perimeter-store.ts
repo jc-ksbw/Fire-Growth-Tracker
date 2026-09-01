@@ -138,7 +138,16 @@ export async function savePerimeterSnapshots(features: PerimeterFeature[]) {
            contained = excluded.contained,
            state = excluded.state,
            county = excluded.county,
-           geometry_json = excluded.geometry_json`,
+           geometry_json = excluded.geometry_json
+         WHERE COALESCE(perimeter_snapshots.unique_fire_id, '') <> COALESCE(excluded.unique_fire_id, '')
+            OR COALESCE(perimeter_snapshots.incident_name, '') <> COALESCE(excluded.incident_name, '')
+            OR COALESCE(perimeter_snapshots.captured_at, -1) <> COALESCE(excluded.captured_at, -1)
+            OR COALESCE(perimeter_snapshots.perimeter_date, -1) <> COALESCE(excluded.perimeter_date, -1)
+            OR COALESCE(perimeter_snapshots.acres, -1) <> COALESCE(excluded.acres, -1)
+            OR COALESCE(perimeter_snapshots.contained, -1) <> COALESCE(excluded.contained, -1)
+            OR COALESCE(perimeter_snapshots.state, '') <> COALESCE(excluded.state, '')
+            OR COALESCE(perimeter_snapshots.county, '') <> COALESCE(excluded.county, '')
+            OR COALESCE(perimeter_snapshots.geometry_json, '') <> COALESCE(excluded.geometry_json, '')`,
       ).bind(
         irwinId,
         textValue(p.attr_UniqueFireIdentifier),
@@ -179,8 +188,9 @@ export async function markFiresActive(fires: Array<{ irwinId: string; incidentNa
        VALUES (?, ?, ?, ?)
        ON CONFLICT(irwin_id) DO UPDATE SET
          last_active_at = excluded.last_active_at,
-         incident_name = excluded.incident_name`,
-    ).bind(fire.irwinId, fire.incidentName, at, at),
+         incident_name = excluded.incident_name
+       WHERE fire_activity.last_active_at < ? OR fire_activity.incident_name <> excluded.incident_name`,
+    ).bind(fire.irwinId, fire.incidentName, at, at, at - 6 * 60 * 60 * 1000),
   );
   for (let i = 0; i < statements.length; i += 40) {
     await db.batch(statements.slice(i, i + 40));

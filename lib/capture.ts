@@ -6,6 +6,7 @@ import {
   getGeoJson,
   normalizePerimeters,
   queryUrl,
+  CALIFORNIA_PERIMETER_BOUNDS,
 } from "./fire-feeds";
 import { markFiresActive, purgePerimeterHistory, savePerimeterSnapshots, seedHistoricalPerimeters } from "./perimeter-store";
 import { getActiveEvacuations } from "./evacuation-feed";
@@ -26,7 +27,7 @@ export async function runCapture() {
   const startedAt = Date.now();
   const [raw, evacuationResult] = await Promise.all([
     getGeoJson(
-      queryUrl(CA_PERIMETERS, PERIMETER_FIELDS, "displayStatus='Active'", true),
+      queryUrl(CA_PERIMETERS, PERIMETER_FIELDS, "displayStatus='Active'", true, CALIFORNIA_PERIMETER_BOUNDS),
       "California fire perimeters",
     ),
     getActiveEvacuations().then((value) => ({ value, error: null })).catch((error: unknown) => ({ value: null, error })),

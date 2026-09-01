@@ -23,10 +23,19 @@ export type Feature = {
 };
 export type FeatureCollection = { type: "FeatureCollection"; features: Feature[] };
 
+/** California perimeter envelope used to keep the national layer out of this tracker. */
+export const CALIFORNIA_PERIMETER_BOUNDS = "-124.5,32.5,-114.0,42.1";
+
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
 
-export function queryUrl(base: string, fields: string, where: string, simplify = false) {
+export function queryUrl(
+  base: string,
+  fields: string,
+  where: string,
+  simplify = false,
+  geometry?: string,
+) {
   const params = new URLSearchParams({
     where,
     outFields: fields,
@@ -38,6 +47,12 @@ export function queryUrl(base: string, fields: string, where: string, simplify =
   if (simplify) {
     params.set("maxAllowableOffset", "0.00035");
     params.set("geometryPrecision", "5");
+  }
+  if (geometry) {
+    params.set("geometry", geometry);
+    params.set("geometryType", "esriGeometryEnvelope");
+    params.set("inSR", "4326");
+    params.set("spatialRel", "esriSpatialRelIntersects");
   }
   return `${base}?${params.toString()}`;
 }
